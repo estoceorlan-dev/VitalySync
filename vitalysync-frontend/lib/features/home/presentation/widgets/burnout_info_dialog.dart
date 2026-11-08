@@ -1,0 +1,835 @@
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+
+import '../../../../shared/theme/app_page_style.dart';
+import '../../../dashboard/data/burnout_score_api.dart';
+import 'package:vitalysync/l10n/localized_text.dart';
+
+class BurnoutInfoDialog extends StatelessWidget {
+  final int score;
+  final String status;
+  final BurnoutScoreSnapshot? latestScore;
+  final BurnoutPatternSummary? patternSummary;
+  final List<Color> accentColors;
+  final VoidCallback onLearnMore;
+
+  const BurnoutInfoDialog({
+    super.key,
+    required this.score,
+    required this.status,
+    required this.latestScore,
+    required this.patternSummary,
+    required this.accentColors,
+    required this.onLearnMore,
+  });
+
+  bool get _restoredDaily =>
+      latestScore?.scoringVersion == 'burnout_engine_v5_daily14_v1' ||
+      _coreOnly;
+
+  bool get _coreOnly =>
+      latestScore?.scoringVersion == 'burnout_engine_v6_core9_v1';
+
+  @override
+  Widget build(BuildContext context) {
+    final screenSize = MediaQuery.sizeOf(context);
+    final isCompact = screenSize.width < 380;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final maxHeight = math.min(620.0, math.max(320.0, screenSize.height - 48));
+    final surfaceColor = isDark ? const Color(0xFF102033) : Colors.white;
+
+    return Dialog(
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: isCompact ? 14 : 22,
+        vertical: 24,
+      ),
+      backgroundColor: Colors.transparent,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: 460, maxHeight: maxHeight),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(isCompact ? 20 : 24),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: surfaceColor,
+              border: Border.all(color: pageBorderColor(context)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildHeader(context, isCompact),
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: EdgeInsets.fromLTRB(
+                      isCompact ? 16 : 20,
+                      16,
+                      isCompact ? 16 : 20,
+                      14,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _InfoSection(
+                          icon: Icons.speed_rounded,
+                          color: const Color(0xFF2563EB),
+                          title: 'What the score means',
+                          child: LocalizedText(
+                            latestScore == null
+                                ? 'Your baseline estimate is $score/100. Complete a daily check-in to update it with your recent inputs.'
+                                : _restoredDaily
+                                ? 'Your daily burnout risk estimate is $score/100. It summarizes your recent check-in and other wellness information. Higher scores suggest more burnout risk.'
+                                : 'This legacy estimate is $score/100. It uses the daily signals, weekly pulse, and baseline available when it was calculated.',
+                            style: _bodyStyle(context),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        _InfoSection(
+                          icon: Icons.shield_outlined,
+                          color: _riskColor(_riskLevel),
+                          title: 'Risk level meaning',
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _Pill(
+                                label: _riskLevel == 'critical'
+                                    ? 'Needs support'
+                                    : '${_humanize(_riskLevel)} risk',
+                                color: _riskColor(_riskLevel),
+                              ),
+                              const SizedBox(height: 8),
+                              LocalizedText(
+                                _riskMeaning(_riskLevel),
+                                style: _bodyStyle(context),
+                              ),
+                              const SizedBox(height: 12),
+                              _buildRiskLevelLegend(context),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        _InfoSection(
+                          icon: Icons.verified_outlined,
+                          color: const Color(0xFF16A34A),
+                          title: 'Confidence score',
+                          child: _buildConfidence(context),
+                        ),
+                        const SizedBox(height: 10),
+                        _InfoSection(
+                          icon: Icons.manage_search_rounded,
+                          color: const Color(0xFF4F46E5),
+                          title: 'Evidence basis',
+                          child: _buildEvidenceBasis(context),
+                        ),
+                        const SizedBox(height: 10),
+                        _InfoSection(
+                          icon: Icons.calendar_view_week_rounded,
+                          color: const Color(0xFF0F766E),
+                          title: _restoredDaily
+                              ? 'Weekly reflection'
+                              : 'Legacy weekly pulse context',
+                          child: _buildWeeklyContext(context),
+                        ),
+                        const SizedBox(height: 10),
+                        _InfoSection(
+                          icon: Icons.fact_check_outlined,
+                          color: const Color(0xFFF97316),
+                          title: 'Missing data',
+                          child: _buildMissingData(context),
+                        ),
+                        const SizedBox(height: 10),
+                        _InfoSection(
+                          icon: Icons.center_focus_strong_rounded,
+                          color: const Color(0xFF7C3AED),
+                          title: 'Main contributing factors',
+                          child: _buildContributingFactors(context),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                _buildLearnMoreButton(context, isCompact),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLearnMoreButton(BuildContext context, bool isCompact) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.fromLTRB(
+        isCompact ? 16 : 20,
+        12,
+        isCompact ? 16 : 20,
+        isCompact ? 16 : 18,
+      ),
+      decoration: BoxDecoration(
+        color: pageSurfaceColor(context).withValues(alpha: 0.96),
+        border: Border(top: BorderSide(color: pageBorderColor(context))),
+      ),
+      child: ElevatedButton.icon(
+        onPressed: onLearnMore,
+        icon: const Icon(Icons.menu_book_rounded, size: 18),
+        label: const LocalizedText('Learn more about burnout'),
+        style: ElevatedButton.styleFrom(
+          elevation: 0,
+          minimumSize: const Size.fromHeight(46),
+          backgroundColor: Theme.of(context).colorScheme.primary,
+          foregroundColor: Theme.of(context).colorScheme.onPrimary,
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader(BuildContext context, bool isCompact) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.fromLTRB(isCompact ? 16 : 20, 16, 8, 14),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: accentColors,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            padding: const EdgeInsets.all(6),
+            decoration: const BoxDecoration(
+              color: Colors.white24,
+              shape: BoxShape.circle,
+            ),
+            child: Image.asset('assets/images/logo.png', fit: BoxFit.contain),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const LocalizedText(
+                  'Burnout score details',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                LocalizedText(
+                  status,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.86),
+                    fontSize: 12.5,
+                    height: 1.25,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Close'.localizedCopy(context),
+            onPressed: () => Navigator.of(context).pop(),
+            color: Colors.white,
+            icon: const Icon(Icons.close_rounded),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildConfidence(BuildContext context) {
+    final scoreSnapshot = latestScore;
+    final patternConfidence = patternSummary?.adaptiveState.confidenceScore;
+    final confidence = scoreSnapshot?.confidenceScore ?? patternConfidence;
+
+    if (confidence == null || confidence <= 0) {
+      return LocalizedText(
+        'Confidence appears after daily wellness answers are available.',
+        style: _bodyStyle(context),
+      );
+    }
+
+    final completeness = scoreSnapshot?.completenessScore;
+    final confidenceColor = confidence >= 70
+        ? const Color(0xFF16A34A)
+        : confidence >= 55
+        ? const Color(0xFFCA8A04)
+        : const Color(0xFFF97316);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            _Pill(
+              label: '${confidence.round()}% confidence',
+              color: confidenceColor,
+            ),
+            if (completeness != null)
+              _Pill(
+                label: '${completeness.round()}% complete',
+                color: const Color(0xFF2563EB),
+              ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        LocalizedText(
+          _restoredDaily
+              ? 'Confidence reflects daily answer coverage. Limited inputs keep recommendations gentler.'
+              : 'Confidence reflects required-field coverage and the age of the legacy weekly pulse used for this score. Limited inputs keep recommendations gentler.',
+          style: _bodyStyle(context),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildWeeklyContext(BuildContext context) {
+    if (_restoredDaily) {
+      return LocalizedText(
+        'Weekly reflection scores remain separate from this daily estimate. View the weekly reflection card for the three questionnaire dimensions.',
+        style: _bodyStyle(context),
+      );
+    }
+    final weeklyContext = latestScore?.weeklyContext;
+    if (weeklyContext == null) {
+      return LocalizedText(
+        latestScore == null
+            ? 'Complete a check-in to begin building weekly context.'
+            : 'This score uses short daily signals only. Weekly questionnaire dimensions are now recorded separately.',
+        style: _bodyStyle(context),
+      );
+    }
+
+    final freshness = _humanize(weeklyContext.freshness);
+    final age = weeklyContext.ageDays;
+    final ageLabel = age == null
+        ? null
+        : age == 0
+        ? 'Completed on the score date'
+        : '$age day${age == 1 ? '' : 's'} old for this score';
+    final color = weeklyContext.isCurrent
+        ? const Color(0xFF0F766E)
+        : weeklyContext.freshness == 'aging'
+        ? const Color(0xFFCA8A04)
+        : const Color(0xFFF97316);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            _Pill(
+              label: '$freshness context',
+              color: color,
+              icon: Icons.event_available_rounded,
+            ),
+            if (weeklyContext.responseDate.isNotEmpty)
+              _Pill(
+                label: _formatDate(context, weeklyContext.responseDate),
+                color: const Color(0xFF2563EB),
+              ),
+          ],
+        ),
+        if (ageLabel != null) ...[
+          const SizedBox(height: 8),
+          LocalizedText(
+            '$ageLabel. Pressure, recovery, detachment, focus, and accomplishment carry forward until the next required pulse.',
+            style: _bodyStyle(context),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildEvidenceBasis(BuildContext context) {
+    final snapshot = latestScore;
+    if (snapshot == null) {
+      return LocalizedText(
+        'Evidence details appear after the first daily score is generated.',
+        style: _bodyStyle(context),
+      );
+    }
+
+    final evidence = snapshot.evidenceBasis;
+    final baselineWeight = evidence.baselineWeight;
+    final coverage = evidence.logCoveragePercent;
+    final window = evidence.windowUsed?.replaceAll('_', ' ');
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            if (window != null && window.isNotEmpty)
+              _Pill(
+                label: '${_humanize(window)} window',
+                color: const Color(0xFF4F46E5),
+              ),
+            if (baselineWeight != null)
+              _Pill(
+                label: '${(baselineWeight * 100).round()}% baseline',
+                color: const Color(0xFF0F766E),
+              ),
+            if (coverage != null)
+              _Pill(
+                label: '${coverage.round()}% log coverage',
+                color: const Color(0xFF2563EB),
+              ),
+            _Pill(
+              label:
+                  '${evidence.weeklyPulseCountSinceEpoch} weekly pulse${evidence.weeklyPulseCountSinceEpoch == 1 ? '' : 's'}',
+              color: const Color(0xFF7C3AED),
+            ),
+          ],
+        ),
+        const SizedBox(height: 9),
+        LocalizedText(snapshot.explanationNote, style: _bodyStyle(context)),
+      ],
+    );
+  }
+
+  Widget _buildMissingData(BuildContext context) {
+    final fields = latestScore?.missingFields ?? const <String>[];
+
+    if (fields.isEmpty) {
+      return LocalizedText(
+        latestScore == null
+            ? 'No daily burnout score has been generated yet. Complete check-ins to unlock richer details.'
+            : 'No required daily or weekly fields are missing from the inputs used for this score.',
+        style: _bodyStyle(context),
+      );
+    }
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: fields
+          .map(
+            (field) => _Pill(
+              label: _humanize(field),
+              color: const Color(0xFFF97316),
+              icon: Icons.add_task_rounded,
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  Widget _buildContributingFactors(BuildContext context) {
+    final factors = latestScore?.contributingFactors ?? const [];
+
+    if (factors.isNotEmpty) {
+      return Column(
+        children: factors.take(4).map((factor) {
+          final label = factor.label.trim().isEmpty
+              ? _humanize(factor.key)
+              : factor.label;
+
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 9),
+            child: _FactorRow(label: label, score: factor.score),
+          );
+        }).toList(),
+      );
+    }
+
+    final window = patternSummary?.windowForDays(7);
+    final pattern = patternSummary?.patterns.isNotEmpty == true
+        ? patternSummary!.patterns.first
+        : null;
+    final fallbackItems = <String>[
+      if (window?.dominantDimensionLabel != null)
+        '${window!.dominantDimensionLabel!} is the strongest tracked signal.',
+      if (pattern != null) pattern.message,
+      if (patternSummary?.adaptiveState.reason.trim().isNotEmpty == true)
+        patternSummary!.adaptiveState.reason,
+    ].where((item) => item.trim().isNotEmpty).toList();
+
+    if (fallbackItems.isEmpty) {
+      return LocalizedText(
+        'Main factors will appear after VitalySync has enough recent score data to compare patterns.',
+        style: _bodyStyle(context),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: fallbackItems.take(3).map((item) {
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 7),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(
+                Icons.auto_awesome_rounded,
+                size: 16,
+                color: Color(0xFF7C3AED),
+              ),
+              const SizedBox(width: 7),
+              Expanded(child: LocalizedText(item, style: _bodyStyle(context))),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  String get _riskLevel {
+    final fromSnapshot = latestScore?.riskLevel.trim().toLowerCase();
+    if (fromSnapshot != null && fromSnapshot.isNotEmpty) {
+      return fromSnapshot;
+    }
+
+    final fromBaselineStatus = _riskLevelFromBaselineStatus(status);
+    if (fromBaselineStatus != null) {
+      return fromBaselineStatus;
+    }
+
+    if (score >= 81) return 'critical';
+    if (score >= 61) return 'high';
+    if (score >= 41) return 'moderate';
+    return 'low';
+  }
+
+  String? _riskLevelFromBaselineStatus(String value) {
+    final normalized = value.trim().toLowerCase();
+
+    if (normalized.startsWith('very low')) {
+      return 'very_low';
+    }
+
+    if (normalized.startsWith('low')) {
+      return 'low';
+    }
+
+    if (normalized.startsWith('moderate')) {
+      return 'moderate';
+    }
+
+    if (normalized.startsWith('very high')) {
+      return 'very_high';
+    }
+
+    if (normalized.startsWith('high')) {
+      return 'high';
+    }
+
+    return null;
+  }
+
+  String _riskMeaning(String risk) {
+    switch (risk) {
+      case 'very_low':
+        return 'Baseline signals look very steady. Keep protecting recovery and routine consistency.';
+      case 'low':
+        return 'Current signals look steady. Keep protecting recovery and routine consistency.';
+      case 'moderate':
+        return 'Some strain signals are present. Watch sleep, workload, mood, and recovery trends.';
+      case 'high':
+        return 'Several signals are elevated. Prioritize recovery time, support, and lighter load where possible.';
+      case 'very_high':
+        return 'Baseline signals are very elevated. Prioritize support, recovery time, and a lighter load where possible.';
+      case 'critical':
+        return 'Risk signals are very elevated. Lower pressure where possible and consider trusted or qualified support if concerns persist.';
+      default:
+        return 'VitalySync is still collecting enough context to classify this score clearly.';
+    }
+  }
+
+  Widget _buildRiskLevelLegend(BuildContext context) {
+    final levels = latestScore == null
+        ? const ['very_low', 'low', 'moderate', 'high', 'very_high']
+        : const ['low', 'moderate', 'high', 'critical'];
+    const dailyLabels = {
+      'low': 'Low risk · 0–33',
+      'moderate': 'Moderate risk · 34–59',
+      'high': 'High risk · 60–79',
+      'critical': 'Needs support · 80–100',
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        LocalizedText(
+          latestScore == null ? 'Baseline risk levels' : 'Daily risk levels',
+          style: TextStyle(
+            color: pagePrimaryTextColor(context),
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 7),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: levels
+              .map(
+                (level) => _Pill(
+                  label: latestScore == null
+                      ? '${_humanize(level)} risk'
+                      : dailyLabels[level]!,
+                  color: _riskColor(level),
+                ),
+              )
+              .toList(),
+        ),
+      ],
+    );
+  }
+
+  Color _riskColor(String risk) {
+    switch (risk) {
+      case 'very_low':
+        return const Color(0xFF0EA5E9);
+      case 'low':
+        return const Color(0xFF16A34A);
+      case 'moderate':
+        return const Color(0xFFCA8A04);
+      case 'high':
+        return const Color(0xFFF97316);
+      case 'very_high':
+        return const Color(0xFFEA580C);
+      case 'critical':
+        return const Color(0xFFDC2626);
+      default:
+        return const Color(0xFF64748B);
+    }
+  }
+
+  String _humanize(String value) {
+    const fieldLabels = {
+      'daily_logs.sleep_hours': 'Sleep duration',
+      'daily_logs.sleep_quality': 'Sleep quality',
+      'daily_logs.mood_index': 'Mood',
+      'daily_logs.energy_level': 'Energy',
+      'daily_logs.hydration_liters': 'Hydration',
+      'daily_logs.workload_hours_band': 'Workload',
+      'daily_logs.exercise_names': 'Movement',
+      'daily_logs.symptom_names': 'Body signals',
+      'daily_logs.habit_names': 'Recovery habits',
+      'daily_logs.perceived_stress_level': 'Daily pressure',
+      'daily_logs.break_quality_level': 'Daily recovery',
+      'daily_logs.daily_detachment_level': 'Daily detachment',
+      'daily_logs.daily_focus_level': 'Daily focus',
+      'daily_logs.daily_accomplishment_level': 'Daily accomplishment',
+      'weekly_pulse_responses.perceived_pressure_level': 'Weekly pressure',
+      'weekly_pulse_responses.recovery_rest_level': 'Weekly recovery',
+      'weekly_pulse_responses.detachment_level': 'Weekly detachment',
+      'weekly_pulse_responses.productivity_focus_level': 'Weekly focus',
+      'weekly_pulse_responses.accomplishment_level': 'Weekly accomplishment',
+    };
+    final knownLabel = fieldLabels[value];
+    if (knownLabel != null) return knownLabel;
+
+    final words = value
+        .split('.')
+        .last
+        .replaceAll('_', ' ')
+        .replaceAll('-', ' ')
+        .split(' ')
+        .where((word) => word.trim().isNotEmpty)
+        .map((word) => word.toLowerCase())
+        .toList();
+    if (words.isEmpty) return 'Unknown';
+    final text = words.join(' ');
+    return '${text[0].toUpperCase()}${text.substring(1)}';
+  }
+
+  String _formatDate(BuildContext context, String value) {
+    final parsed = DateTime.tryParse(value);
+    return parsed == null
+        ? value
+        : MaterialLocalizations.of(context).formatMediumDate(parsed);
+  }
+
+  TextStyle _bodyStyle(BuildContext context) {
+    return TextStyle(
+      color: pageSecondaryTextColor(context),
+      fontSize: 12.8,
+      height: 1.38,
+      fontWeight: FontWeight.w600,
+    );
+  }
+}
+
+class _InfoSection extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String title;
+  final Widget child;
+
+  const _InfoSection({
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isDark
+            ? Colors.white.withValues(alpha: 0.05)
+            : const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: pageBorderColor(context)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, size: 16, color: color),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: LocalizedText(
+                  title,
+                  style: TextStyle(
+                    color: pagePrimaryTextColor(context),
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 9),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class _Pill extends StatelessWidget {
+  final String label;
+  final Color color;
+  final IconData? icon;
+
+  const _Pill({required this.label, required this.color, this.icon});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 13, color: color),
+            const SizedBox(width: 5),
+          ],
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 220),
+            child: LocalizedText(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: color,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FactorRow extends StatelessWidget {
+  final String label;
+  final double score;
+
+  const _FactorRow({required this.label, required this.score});
+
+  @override
+  Widget build(BuildContext context) {
+    final value = score.clamp(0, 100).toDouble();
+    final color = value >= 65
+        ? const Color(0xFFDC2626)
+        : value >= 45
+        ? const Color(0xFFF97316)
+        : const Color(0xFF16A34A);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: LocalizedText(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: pagePrimaryTextColor(context),
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            LocalizedText(
+              value.round().toString(),
+              style: TextStyle(
+                color: color,
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 5),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          child: LinearProgressIndicator(
+            value: value / 100,
+            minHeight: 5,
+            backgroundColor: color.withValues(alpha: 0.12),
+            valueColor: AlwaysStoppedAnimation<Color>(color),
+          ),
+        ),
+      ],
+    );
+  }
+}

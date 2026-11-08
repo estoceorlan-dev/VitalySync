@@ -1,0 +1,606 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../../../../features/adaptive/data/adaptive_nudge_api.dart';
+import '../../../../features/adaptive/data/wellness_content_api.dart';
+import '../widgets/personal_insight_card.dart';
+import '../../../../features/activity/data/activity_service.dart';
+import '../../../../features/nutrition/data/nutrition_api.dart';
+import '../../../../features/activity/presentation/widgets/activity_summary_card.dart';
+import '../../data/weekly_user_metrics.dart';
+import '../../data/burnout_score_api.dart';
+import '../../data/burnout_display_data.dart';
+import '../../../../shared/goals/user_goals.dart';
+import '../../../../shared/learning/first_week_learning_service.dart';
+import '../../../../shared/notifications/notification_feed_service.dart';
+import '../../../../shared/preferences/app_preferences.dart';
+import '../../../../shared/theme/app_page_style.dart';
+import '../../../../shared/widgets/app_bar.dart';
+import '../../../../shared/widgets/reveal_on_build.dart';
+import '../../../../shared/widgets/sensitive_content_guard.dart';
+import '../widgets/burnout_risk_trend_card.dart';
+import '../widgets/dashboard_goal_tracking_card.dart';
+import '../widgets/dashboard_header_card.dart';
+import '../widgets/dashboard_stat_card.dart';
+import '../widgets/mood_volatility_card.dart';
+import '../widgets/nutrition_analytics_card.dart';
+import '../widgets/sleep_pattern_card.dart';
+import '../widgets/symptom_frequency_card.dart';
+import '../widgets/weekly_performance_card.dart';
+import '../widgets/wellness_index_card.dart';
+
+class Dashboard extends StatefulWidget {
+  const Dashboard({super.key});
+
+  @override
+  State<Dashboard> createState() => _DashboardState();
+}
+
+class _DashboardState extends State<Dashboard> {
+  BurnoutDisplayData? _burnoutData;
+  BurnoutPatternSummary? get _burnoutPatternSummary =>
+      _burnoutData?.patternSummary;
+  AdaptiveNudgeRecommendation? _aiInsightNudge;
+  FirstWeekLearningState _firstWeekLearning =
+      const FirstWeekLearningState.hidden();
+  bool _isLoadingBurnoutPatterns = true;
+  bool _isLoadingAiInsight = true;
+  bool _isLoadingWeeklyMetrics = true;
+  bool _isRefreshingWeeklyMetrics = false;
+  WeeklyUserMetrics? _currentWeekMetrics;
+  WeeklyUserMetrics? _previousWeekMetrics;
+  int _refreshVersion = 0;
+  int _burnoutLoadToken = 0;
+  int _insightLoadToken = 0;
+  int _firstWeekLoadToken = 0;
+  int _weeklyMetricsLoadToken = 0;
+  Timer? _weeklyMetricsRefreshDebounce;
+  Timer? _insightRefreshDebounce;
+  String? _insightLocale;
+  bool _insightsPaused = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _insightLocale =
+        AppPreferencesController.instance.notifier.value.locale.languageCode;
+    _insightsPaused =
+        AppPreferencesController.instance.notifier.value.pauseWellnessInsights;
+    AppPreferencesController.instance.notifier.addListener(
+      _handleInsightPreferences,
+    );
+    ActivityService.insightRefreshSignal.addListener(_scheduleInsightRefresh);
+    WellnessContentApi.changes.addListener(_scheduleInsightRefresh);
+    BurnoutScoreApi.refreshSignal.addListener(_handleBurnoutInputsChanged);
+    UserGoalsService.refreshSignal.addListener(_handleSummaryInputsChanged);
+    NutritionApi.refreshSignal.addListener(_handleSummaryInputsChanged);
+    WeeklyUserMetricsService.refreshSignal.addListener(
+      _handleWeeklyMetricsChanged,
+    );
+    _loadBurnoutPatterns();
+    unawaited(_loadPersonalInsight());
+    unawaited(_loadWeeklyMetrics());
+    unawaited(_loadFirstWeekLearning());
+  }
+
+  @override
+  void dispose() {
+    WellnessContentApi.changes.removeListener(_scheduleInsightRefresh);
+    BurnoutScoreApi.refreshSignal.removeListener(_handleBurnoutInputsChanged);
+    UserGoalsService.refreshSignal.removeListener(_handleSummaryInputsChanged);
+    NutritionApi.refreshSignal.removeListener(_handleSummaryInputsChanged);
+    WeeklyUserMetricsService.refreshSignal.removeListener(
+      _handleWeeklyMetricsChanged,
+    );
+    _weeklyMetricsRefreshDebounce?.cancel();
+    _insightRefreshDebounce?.cancel();
+    AppPreferencesController.instance.notifier.removeListener(
+      _handleInsightPreferences,
+    );
+    ActivityService.insightRefreshSignal.removeListener(
+      _scheduleInsightRefresh,
+    );
+    super.dispose();
+  }
+
+  void _scheduleInsightRefresh() {
+    _insightRefreshDebounce?.cancel();
+    _insightRefreshDebounce = Timer(const Duration(milliseconds: 600), () {
+      if (mounted) unawaited(_loadPersonalInsight());
+    });
+  }
+
+  void _handleInsightPreferences() {
+    final prefs = AppPreferencesController.instance.notifier.value;
+    if (_insightLocale != prefs.locale.languageCode ||
+        _insightsPaused != prefs.pauseWellnessInsights) {
+      _insightLocale = prefs.locale.languageCode;
+      _insightsPaused = prefs.pauseWellnessInsights;
+      _insightLoadToken++;
+      if (mounted) setState(() => _aiInsightNudge = null);
+      _scheduleInsightRefresh();
+    }
+  }
+
+  void _handleBurnoutInputsChanged() {
+    _scheduleInsightRefresh();
+    _loadBurnoutPatterns();
+    unawaited(_loadWeeklyMetrics());
+    unawaited(_loadFirstWeekLearning());
+  }
+
+  void _handleSummaryInputsChanged() {
+    _scheduleInsightRefresh();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _refreshVersion++;
+    });
+  }
+
+  void _handleWeeklyMetricsChanged() {
+    _weeklyMetricsRefreshDebounce?.cancel();
+    _weeklyMetricsRefreshDebounce = Timer(
+      const Duration(milliseconds: 100),
+      () => unawaited(_loadWeeklyMetrics()),
+    );
+  }
+
+  Future<void> _loadBurnoutPatterns({bool forceRefresh = false}) async {
+    final loadToken = ++_burnoutLoadToken;
+    setState(() => _isLoadingBurnoutPatterns = _burnoutData == null);
+    final data = await BurnoutDisplayData.load(forceRefresh: forceRefresh);
+    if (!mounted || loadToken != _burnoutLoadToken) return;
+    setState(() {
+      _burnoutData = data;
+      _isLoadingBurnoutPatterns = false;
+    });
+  }
+
+  Future<void> _loadPersonalInsight() async {
+    final loadToken = ++_insightLoadToken;
+    setState(() => _isLoadingAiInsight = _aiInsightNudge == null);
+    AdaptiveNudgeRecommendation? insight;
+    try {
+      if (!AppPreferencesController
+          .instance
+          .notifier
+          .value
+          .pauseWellnessInsights) {
+        insight = await AdaptiveNudgeApi.fetchPersonalInsight();
+      }
+    } catch (_) {
+      insight = null;
+    }
+    if (!mounted || loadToken != _insightLoadToken) return;
+    setState(() {
+      _aiInsightNudge = insight;
+      _isLoadingAiInsight = false;
+    });
+  }
+
+  Future<void> _loadFirstWeekLearning() async {
+    final loadToken = ++_firstWeekLoadToken;
+    final learningState = await FirstWeekLearningService.load();
+    if (!mounted || loadToken != _firstWeekLoadToken) return;
+
+    setState(() {
+      _firstWeekLearning = learningState;
+    });
+  }
+
+  Future<void> _loadWeeklyMetrics({bool forceRefresh = false}) async {
+    final loadToken = ++_weeklyMetricsLoadToken;
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _isLoadingWeeklyMetrics = _currentWeekMetrics == null;
+      _isRefreshingWeeklyMetrics = _currentWeekMetrics != null;
+    });
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final currentStart = today.subtract(const Duration(days: 6));
+    final previousEnd = currentStart.subtract(const Duration(days: 1));
+    final previousStart = previousEnd.subtract(const Duration(days: 6));
+
+    try {
+      final results = await Future.wait([
+        _loadWeeklyRange(
+          start: currentStart,
+          end: today,
+          forceRefresh: forceRefresh,
+          fallback: _currentWeekMetrics,
+        ),
+        _loadWeeklyRange(
+          start: previousStart,
+          end: previousEnd,
+          forceRefresh: forceRefresh,
+          fallback: _previousWeekMetrics,
+        ),
+      ]);
+
+      if (!mounted || loadToken != _weeklyMetricsLoadToken) {
+        return;
+      }
+
+      setState(() {
+        _currentWeekMetrics = results[0];
+        _previousWeekMetrics = results[1];
+        _isLoadingWeeklyMetrics = false;
+        _isRefreshingWeeklyMetrics = false;
+      });
+    } catch (_) {
+      if (!mounted || loadToken != _weeklyMetricsLoadToken) {
+        return;
+      }
+
+      setState(() {
+        _currentWeekMetrics ??= WeeklyUserMetricsService.empty(
+          start: currentStart,
+        );
+        _previousWeekMetrics ??= WeeklyUserMetricsService.empty(
+          start: previousStart,
+        );
+        _isLoadingWeeklyMetrics = false;
+        _isRefreshingWeeklyMetrics = false;
+      });
+    }
+  }
+
+  Future<WeeklyUserMetrics> _loadWeeklyRange({
+    required DateTime start,
+    required DateTime end,
+    required bool forceRefresh,
+    required WeeklyUserMetrics? fallback,
+  }) async {
+    try {
+      return await WeeklyUserMetricsService.loadRange(
+        start: start,
+        end: end,
+        forceRefresh: forceRefresh,
+      );
+    } catch (_) {
+      return fallback ?? WeeklyUserMetricsService.empty(start: start);
+    }
+  }
+
+  Future<void> _refreshWeeklyMetrics() async {
+    try {
+      await ActivityService.instance.refresh();
+    } catch (_) {
+      // Weekly history can still refresh when today's live activity cannot.
+    }
+    await _loadWeeklyMetrics(forceRefresh: true);
+  }
+
+  Future<void> _refreshDashboard() async {
+    setState(() {
+      _refreshVersion++;
+    });
+
+    await Future.wait([
+      _refreshWeeklyMetrics(),
+      _loadBurnoutPatterns(forceRefresh: true),
+      _loadPersonalInsight(),
+      _loadFirstWeekLearning(),
+      refreshAppBarStreak(),
+      refreshNotificationFeed(),
+    ]);
+  }
+
+  String _burnoutRiskValue() {
+    final score = _burnoutData?.score;
+    return score == null ? '--' : '$score/100';
+  }
+
+  String _burnoutRiskSubtitle() {
+    final data = _burnoutData;
+    if (_isLoadingBurnoutPatterns) return 'Loading estimate';
+    return data?.status ?? 'No estimate yet';
+  }
+
+  Color _burnoutRiskColor() => switch (_burnoutData?.riskLevel) {
+    'very_low' => const Color(0xFF096EB1),
+    'low' => const Color(0xFF097790),
+    'moderate' => const Color(0xFF9A7307),
+    'high' => const Color(0xFFD46E14),
+    'very_high' || 'critical' => const Color(0xFFE74C3C),
+    _ => const Color(0xFF64748B),
+  };
+
+  Color _burnoutTrendColor() {
+    final trend = _burnoutPatternSummary?.windowForDays(7)?.trendDirection;
+    if (trend == 'falling') {
+      return Colors.green;
+    }
+    if (trend == 'rising') {
+      return Colors.red;
+    }
+
+    return const Color(0xFF64748B);
+  }
+
+  IconData _burnoutTrendIcon() {
+    final trend = _burnoutPatternSummary?.windowForDays(7)?.trendDirection;
+    if (trend == 'falling') {
+      return Icons.trending_down;
+    }
+    if (trend == 'rising') {
+      return Icons.trending_up;
+    }
+
+    return Icons.trending_flat;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: buildPageDecoration(context),
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: SafeArea(
+          child: RefreshIndicator(
+            onRefresh: _refreshDashboard,
+            child: SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: EdgeInsets.fromLTRB(
+                12,
+                12,
+                12,
+                mainPageBottomContentPadding(context),
+              ),
+              child: Column(
+                children: [
+                  RevealOnBuild(
+                    child: DashboardHeaderCard(
+                      learningState: _firstWeekLearning,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SensitiveContentGuard(
+                    child: Column(
+                      children: [
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 70),
+                          child: Row(
+                            children: [
+                              DashboardStatCard(
+                                title: "Burnout Risk estimate",
+                                value: _burnoutRiskValue(),
+                                subtitle: _burnoutRiskSubtitle(),
+                                detail: _burnoutData?.sourceLabel,
+                                subtitleColor: _burnoutRiskColor(),
+                                icon: _burnoutTrendIcon(),
+                                iconColor: _burnoutTrendColor(),
+                                isLoading: _isLoadingBurnoutPatterns,
+                              ),
+                              const SizedBox(width: 10),
+                              _AvgSleepStatCard(
+                                currentWeek: _currentWeekMetrics,
+                                previousWeek: _previousWeekMetrics,
+                                isLoading: _isLoadingWeeklyMetrics,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 140),
+                          child: BurnoutRiskTrendCard(
+                            summary: _burnoutPatternSummary,
+                            isLoading: _isLoadingBurnoutPatterns,
+                            onRefresh: () =>
+                                _loadBurnoutPatterns(forceRefresh: true),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 200),
+                          child: PersonalInsightCard(
+                            recommendation: _aiInsightNudge,
+                            isLoading: _isLoadingAiInsight,
+                            learningState: _firstWeekLearning,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 260),
+                          child: ValueListenableBuilder<ActivityTrackingState>(
+                            valueListenable: ActivityService.instance.notifier,
+                            builder: (context, activityState, _) {
+                              return WeeklyStepAnalyticsCard(
+                                state: activityState,
+                                currentWeek: _currentWeekMetrics,
+                                previousWeek: _previousWeekMetrics,
+                                isLoading: _isLoadingWeeklyMetrics,
+                                isRefreshing: _isRefreshingWeeklyMetrics,
+                                onRefresh: _refreshWeeklyMetrics,
+                                compact: true,
+                              );
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 320),
+                          child: NutritionAnalyticsCard(
+                            refreshVersion: _refreshVersion,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 380),
+                          child: SleepPatternCard(
+                            metrics: _currentWeekMetrics,
+                            isLoading: _isLoadingWeeklyMetrics,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 440),
+                          child: ValueListenableBuilder<ActivityTrackingState>(
+                            valueListenable: ActivityService.instance.notifier,
+                            builder: (context, activityState, _) {
+                              return WellnessIndexCard(
+                                metrics: _currentWeekMetrics
+                                    ?.withLatestActivity(activityState.log),
+                                isLoading: _isLoadingWeeklyMetrics,
+                              );
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 500),
+                          child: MoodVolatilityCard(
+                            metrics: _currentWeekMetrics,
+                            isLoading: _isLoadingWeeklyMetrics,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 560),
+                          child: SymptomFrequencyCard(
+                            metrics: _currentWeekMetrics,
+                            isLoading: _isLoadingWeeklyMetrics,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 620),
+                          child: DashboardGoalTrackingCard(
+                            weeklyMetrics: _currentWeekMetrics,
+                            isLoadingWeeklyMetrics: _isLoadingWeeklyMetrics,
+                            refreshVersion: _refreshVersion,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        RevealOnBuild(
+                          delay: const Duration(milliseconds: 680),
+                          child: WeeklyPerformanceCard(
+                            metrics: _currentWeekMetrics,
+                            isLoading: _isLoadingWeeklyMetrics,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AvgSleepStatCard extends StatelessWidget {
+  final WeeklyUserMetrics? currentWeek;
+  final WeeklyUserMetrics? previousWeek;
+  final bool isLoading;
+
+  const _AvgSleepStatCard({
+    required this.currentWeek,
+    required this.previousWeek,
+    required this.isLoading,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final currentAverage = currentWeek?.averageSleep ?? 0;
+    final previousAverage = previousWeek?.averageSleep ?? 0;
+    final delta = currentAverage - previousAverage;
+
+    return DashboardStatCard(
+      title: "Average sleep",
+      value: currentAverage > 0
+          ? "${currentAverage.toStringAsFixed(1)}h"
+          : "--",
+      subtitle: _subtitle(
+        isLoading: isLoading,
+        currentAverage: currentAverage,
+        previousAverage: previousAverage,
+        delta: delta,
+      ),
+      subtitleColor: _subtitleColor(
+        isLoading: isLoading,
+        currentAverage: currentAverage,
+        delta: delta,
+      ),
+      icon: _trendIcon(
+        isLoading: isLoading,
+        currentAverage: currentAverage,
+        delta: delta,
+      ),
+      iconColor: _subtitleColor(
+        isLoading: isLoading,
+        currentAverage: currentAverage,
+        delta: delta,
+      ),
+      isLoading: isLoading,
+    );
+  }
+
+  String _subtitle({
+    required bool isLoading,
+    required double currentAverage,
+    required double previousAverage,
+    required double delta,
+  }) {
+    if (isLoading) {
+      return 'Loading trend';
+    }
+    if (currentAverage <= 0) {
+      return 'No sleep logs yet';
+    }
+    if (previousAverage <= 0) {
+      return 'Based on this week\'s chart';
+    }
+
+    final prefix = delta > 0 ? '+' : '';
+    return '$prefix${delta.toStringAsFixed(1)}h from last week';
+  }
+
+  Color _subtitleColor({
+    required bool isLoading,
+    required double currentAverage,
+    required double delta,
+  }) {
+    if (isLoading || currentAverage <= 0) {
+      return const Color(0xFF64748B);
+    }
+    if (delta > 0.05) {
+      return Colors.green;
+    }
+    if (delta < -0.05) {
+      return Colors.red;
+    }
+
+    return const Color(0xFF64748B);
+  }
+
+  IconData _trendIcon({
+    required bool isLoading,
+    required double currentAverage,
+    required double delta,
+  }) {
+    if (isLoading || currentAverage <= 0) {
+      return Icons.trending_flat;
+    }
+    if (delta > 0.05) {
+      return Icons.trending_up;
+    }
+    if (delta < -0.05) {
+      return Icons.trending_down;
+    }
+
+    return Icons.trending_flat;
+  }
+}

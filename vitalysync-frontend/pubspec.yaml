@@ -1,0 +1,65 @@
+name: vitalysync
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.1+3
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  intl: ^0.20.2
+  shared_preferences: ^2.0.15
+  http: ^1.1.0
+  http_parser: ^4.1.2
+  confetti: ^0.8.0
+  image_picker: ^1.2.1
+  crop_your_image: ^2.0.0
+  image: ^4.8.0
+  fl_chart: ^1.2.0
+  another_flushbar: ^1.12.30
+  geolocator: ^14.0.2
+  lottie: ^3.3.3
+  pedometer: ^4.2.0
+  permission_handler: ^12.0.1
+  flutter_local_notifications: ^20.1.0
+  timezone: ^0.10.1
+  google_fonts: ^8.1.0
+  flutter_svg: ^2.3.0
+  skeletonizer: ^2.1.3
+  getwidget: ^7.0.2
+  liquid_swipe: ^3.1.0
+  animated_bottom_navigation_bar: ^1.4.0
+  flutter_animate: ^4.5.2
+  flutter_secure_storage: ^10.3.1
+  local_auth: ^2.3.0
+  path_provider: ^2.1.6
+  package_info_plus: ^10.2.0
+  open_filex: ^4.7.0
+  universal_html: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  generate: true
+  uses-material-design: true
+
+  assets:
+    - assets/images/
+    - assets/images/avatars/
+    - assets/images/check_in_avatars/
+    - assets/animations/
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/logo.png"

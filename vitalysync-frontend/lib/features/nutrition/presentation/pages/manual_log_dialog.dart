@@ -1,0 +1,607 @@
+part of 'nutrition_page.dart';
+
+class _ManualLogDialog extends StatefulWidget {
+  final String initialMealType;
+  final Map<String, bool> loggedMealTypes;
+  final List<String> mealSuggestions;
+
+  const _ManualLogDialog({
+    required this.initialMealType,
+    required this.loggedMealTypes,
+    required this.mealSuggestions,
+  });
+
+  @override
+  State<_ManualLogDialog> createState() => _ManualLogDialogState();
+}
+
+class _ManualLogDialogState extends State<_ManualLogDialog> {
+  final ScrollController _scrollController = ScrollController();
+  final List<_ManualMealDraft> _drafts = [_ManualMealDraft()];
+  late String _selectedMealType;
+  final Set<String> _unlockedLoggedMealTypes = {};
+  int _lockedMealTapCount = 0;
+  String? _lockedMealTapType;
+  DateTime? _lockedMealLastTapAt;
+  String? _errorText;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedMealType = widget.initialMealType;
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    for (final draft in _drafts) {
+      draft.dispose();
+    }
+    super.dispose();
+  }
+
+  void _addMealForm() {
+    setState(() {
+      _errorText = null;
+      _drafts.add(_ManualMealDraft());
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToLatestMealForm();
+    });
+  }
+
+  Future<void> _scrollToLatestMealForm() async {
+    if (!mounted || !_scrollController.hasClients) {
+      return;
+    }
+
+    await _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _removeMealForm(int index) {
+    if (_drafts.length == 1) {
+      _drafts[index].clear();
+      return;
+    }
+
+    setState(() {
+      _errorText = null;
+      final removed = _drafts.removeAt(index);
+      removed.dispose();
+    });
+  }
+
+  void _submit() {
+    if (!_canSelectMealType(_selectedMealType)) {
+      setState(() {
+        _errorText =
+            'Triple-tap ${_mealTypeLabel(_selectedMealType)} to update the existing log.';
+      });
+      return;
+    }
+
+    final filledDrafts = _drafts.where((draft) => draft.hasAnyInput).toList();
+
+    if (filledDrafts.isEmpty) {
+      setState(() {
+        _errorText = 'Add at least one meal to analyze.';
+      });
+      return;
+    }
+
+    final hasIncompleteDraft = filledDrafts.any(
+      (draft) => draft.mealName.isEmpty || draft.quantity.isEmpty,
+    );
+
+    if (hasIncompleteDraft) {
+      setState(() {
+        _errorText = 'Meal name and quantity are required.';
+      });
+      return;
+    }
+
+    Navigator.of(context).pop(
+      _ManualLogResult(
+        mealType: _selectedMealType,
+        allowLoggedMealUpdate: _unlockedLoggedMealTypes.contains(
+          _selectedMealType,
+        ),
+        meals: filledDrafts
+            .map(
+              (draft) => ManualNutritionInput(
+                mealName: draft.mealName,
+                quantity: draft.quantity,
+                notes: draft.notes,
+              ),
+            )
+            .toList(),
+      ),
+    );
+  }
+
+  bool _canSelectMealType(String mealType) {
+    return !_isLoggedStandardMeal(widget.loggedMealTypes, mealType) ||
+        _unlockedLoggedMealTypes.contains(mealType);
+  }
+
+  void _selectMealType(String mealType) {
+    setState(() {
+      _selectedMealType = mealType;
+      _errorText = null;
+    });
+  }
+
+  void _handleLockedMealTypeTap(String mealType) {
+    final now = DateTime.now();
+    final isSameMeal = _lockedMealTapType == mealType;
+    final isQuickTap =
+        _lockedMealLastTapAt != null &&
+        now.difference(_lockedMealLastTapAt!) <=
+            const Duration(milliseconds: 900);
+
+    _lockedMealTapType = mealType;
+    _lockedMealLastTapAt = now;
+    _lockedMealTapCount = isSameMeal && isQuickTap
+        ? _lockedMealTapCount + 1
+        : 1;
+
+    setState(() {
+      if (_lockedMealTapCount >= 3) {
+        _unlockedLoggedMealTypes.add(mealType);
+        _selectedMealType = mealType;
+        _lockedMealTapCount = 0;
+        _lockedMealTapType = null;
+        _lockedMealLastTapAt = null;
+        _errorText = null;
+        return;
+      }
+
+      if (_lockedMealTapCount == 1) {
+        _errorText =
+            '${_mealTypeLabel(mealType)} is already logged. Triple-tap it to edit.';
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final width = MediaQuery.of(context).size.width;
+    final isCompact = width < 380;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Dialog(
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: isCompact ? 14 : 22,
+        vertical: 24,
+      ),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(isCompact ? 20 : 24),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520, maxHeight: 680),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(isCompact ? 20 : 24),
+          child: Container(
+            decoration: BoxDecoration(
+              color: pageSurfaceColor(context),
+              border: Border.all(color: pageBorderColor(context)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    isCompact ? 16 : 20,
+                    isCompact ? 16 : 20,
+                    isCompact ? 8 : 12,
+                    10,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            LocalizedText(
+                              'Manual log',
+                              style: TextStyle(
+                                fontSize: isCompact ? 18 : 20,
+                                fontWeight: FontWeight.w800,
+                                color: pagePrimaryTextColor(context),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            LocalizedText(
+                              'Estimate nutrition from typed meal details.',
+                              style: TextStyle(
+                                fontSize: isCompact ? 12 : 13,
+                                color: pageSecondaryTextColor(context),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            LocalizedText(
+                              'Use English food names for better estimates.',
+                              style: TextStyle(
+                                fontSize: isCompact ? 11.5 : 12,
+                                fontWeight: FontWeight.w600,
+                                color: const Color(0xFF15803D),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _addMealForm,
+                        tooltip: 'Add meal'.localizedCopy(context),
+                        icon: const Icon(Icons.add_circle_outline_rounded),
+                        color: const Color(0xFF16A34A),
+                      ),
+                    ],
+                  ),
+                ),
+                Flexible(
+                  child: SingleChildScrollView(
+                    controller: _scrollController,
+                    padding: EdgeInsets.symmetric(
+                      horizontal: isCompact ? 16 : 20,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        MealTypeChoices(
+                          selectedMealType: _selectedMealType,
+                          onMealTypeChanged: _selectMealType,
+                          canSelectMealType: _canSelectMealType,
+                          onLockedMealTypeTap: _handleLockedMealTypeTap,
+                        ),
+                        SizedBox(height: isCompact ? 12 : 14),
+                        ..._drafts.asMap().entries.map(
+                          (entry) => _ManualMealForm(
+                            key: ValueKey(entry.value.id),
+                            draft: entry.value,
+                            index: entry.key,
+                            canRemove: _drafts.length > 1,
+                            onRemove: () => _removeMealForm(entry.key),
+                            isCompact: isCompact,
+                            mealSuggestions: widget.mealSuggestions,
+                          ),
+                        ),
+                        if (_errorText != null) ...[
+                          const SizedBox(height: 2),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: LocalizedText(
+                              _errorText!,
+                              style: const TextStyle(
+                                color: Color(0xFFDC2626),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: EdgeInsets.all(isCompact ? 16 : 20),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: const LocalizedText('Cancel'),
+                        ),
+                      ),
+                      SizedBox(width: isCompact ? 10 : 12),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: _submit,
+                          icon: const Icon(Icons.auto_awesome_rounded),
+                          label: const LocalizedText('Analyze'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: isDark
+                                ? const Color(0xFF5D4385)
+                                : const Color(0xFF16A34A),
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              vertical: isCompact ? 12 : 14,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ManualLogResult {
+  final String mealType;
+  final bool allowLoggedMealUpdate;
+  final List<ManualNutritionInput> meals;
+
+  const _ManualLogResult({
+    required this.mealType,
+    required this.allowLoggedMealUpdate,
+    required this.meals,
+  });
+}
+
+class _ManualMealDraft {
+  static int _nextId = 0;
+
+  final int id = _nextId++;
+  final TextEditingController mealNameController = TextEditingController();
+  final TextEditingController quantityController = TextEditingController();
+  final TextEditingController notesController = TextEditingController();
+  final FocusNode mealNameFocusNode = FocusNode();
+
+  String get mealName => mealNameController.text.trim();
+  String get quantity => quantityController.text.trim();
+  String get notes => notesController.text.trim();
+
+  bool get hasAnyInput =>
+      mealName.isNotEmpty || quantity.isNotEmpty || notes.isNotEmpty;
+
+  void clear() {
+    mealNameController.clear();
+    quantityController.clear();
+    notesController.clear();
+  }
+
+  void dispose() {
+    mealNameController.dispose();
+    mealNameFocusNode.dispose();
+    quantityController.dispose();
+    notesController.dispose();
+  }
+}
+
+class _ManualMealForm extends StatelessWidget {
+  final _ManualMealDraft draft;
+  final int index;
+  final bool canRemove;
+  final VoidCallback onRemove;
+  final bool isCompact;
+  final List<String> mealSuggestions;
+
+  const _ManualMealForm({
+    super.key,
+    required this.draft,
+    required this.index,
+    required this.canRemove,
+    required this.onRemove,
+    required this.isCompact,
+    required this.mealSuggestions,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: EdgeInsets.only(bottom: isCompact ? 12 : 14),
+      padding: EdgeInsets.all(isCompact ? 12 : 14),
+      decoration: BoxDecoration(
+        color: pageSubtleSurfaceColor(context),
+        borderRadius: BorderRadius.circular(isCompact ? 16 : 18),
+        border: Border.all(color: pageBorderColor(context)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: LocalizedText(
+                  'Meal ${index + 1}',
+                  style: TextStyle(
+                    fontSize: isCompact ? 14 : 15,
+                    fontWeight: FontWeight.w800,
+                    color: pagePrimaryTextColor(context),
+                  ),
+                ),
+              ),
+              IconButton(
+                onPressed: onRemove,
+                tooltip: canRemove ? 'Remove meal' : 'Clear meal',
+                icon: Icon(
+                  canRemove
+                      ? Icons.remove_circle_outline_rounded
+                      : Icons.cleaning_services_outlined,
+                ),
+                color: const Color(0xFFEF4444),
+              ),
+            ],
+          ),
+          SizedBox(height: isCompact ? 8 : 10),
+          _MealNameAutocompleteField(
+            controller: draft.mealNameController,
+            focusNode: draft.mealNameFocusNode,
+            suggestions: mealSuggestions,
+            isCompact: isCompact,
+            textInputAction: TextInputAction.next,
+          ),
+          SizedBox(height: isCompact ? 8 : 10),
+          NutritionQuantityField(
+            mealNameController: draft.mealNameController,
+            quantityController: draft.quantityController,
+            decoration: _inputDecoration(context, 'Quantity'),
+          ),
+          SizedBox(height: isCompact ? 8 : 10),
+          TextField(
+            controller: draft.notesController,
+            minLines: 2,
+            maxLines: 4,
+            decoration: _inputDecoration(context, 'Optional notes'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  InputDecoration _inputDecoration(BuildContext context, String label) {
+    return InputDecoration(
+      labelText: label,
+      filled: true,
+      fillColor: pageSubtleSurfaceColor(context),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(isCompact ? 12 : 14),
+        borderSide: BorderSide(color: pageBorderColor(context)),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(isCompact ? 12 : 14),
+        borderSide: BorderSide(color: pageBorderColor(context)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(isCompact ? 12 : 14),
+        borderSide: const BorderSide(color: Color(0xFF16A34A), width: 1.4),
+      ),
+    );
+  }
+}
+
+class _MealNameAutocompleteField extends StatelessWidget {
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final List<String> suggestions;
+  final bool isCompact;
+  final TextInputAction textInputAction;
+
+  const _MealNameAutocompleteField({
+    required this.controller,
+    required this.focusNode,
+    required this.suggestions,
+    required this.isCompact,
+    required this.textInputAction,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return RawAutocomplete<String>(
+      textEditingController: controller,
+      focusNode: focusNode,
+      displayStringForOption: (option) => option,
+      optionsBuilder: (textEditingValue) {
+        final query = textEditingValue.text.trim().toLowerCase();
+        if (query.isEmpty || suggestions.isEmpty) {
+          return const Iterable<String>.empty();
+        }
+
+        return suggestions
+            .where((suggestion) {
+              final normalizedSuggestion = suggestion.toLowerCase();
+              return normalizedSuggestion.contains(query) &&
+                  normalizedSuggestion != query;
+            })
+            .take(5);
+      },
+      onSelected: (selection) {
+        controller.value = TextEditingValue(
+          text: selection,
+          selection: TextSelection.collapsed(offset: selection.length),
+        );
+      },
+      fieldViewBuilder:
+          (context, fieldController, fieldFocusNode, onFieldSubmitted) {
+            return TextField(
+              controller: fieldController,
+              focusNode: fieldFocusNode,
+              textInputAction: textInputAction,
+              decoration: _inputDecoration(context, 'Meal name'),
+            );
+          },
+      optionsViewBuilder: (context, onSelected, options) {
+        final screenWidth = MediaQuery.sizeOf(context).width;
+        final optionWidth = screenWidth - (isCompact ? 56 : 88);
+
+        return Align(
+          alignment: Alignment.topLeft,
+          child: Material(
+            elevation: 8,
+            borderRadius: BorderRadius.circular(isCompact ? 12 : 14),
+            color: pageSurfaceColor(context),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: optionWidth.clamp(240, 480).toDouble(),
+                maxHeight: 220,
+              ),
+              child: ListView.separated(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                shrinkWrap: true,
+                itemCount: options.length,
+                separatorBuilder: (_, _) => Divider(
+                  height: 1,
+                  thickness: 1,
+                  color: pageBorderColor(context),
+                ),
+                itemBuilder: (context, index) {
+                  final option = options.elementAt(index);
+                  return InkWell(
+                    onTap: () => onSelected(option),
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: isCompact ? 12 : 14,
+                        vertical: isCompact ? 10 : 12,
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.history_rounded,
+                            size: 18,
+                            color: Color(0xFF16A34A),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: LocalizedText(
+                              option,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: pagePrimaryTextColor(context),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  InputDecoration _inputDecoration(BuildContext context, String label) {
+    return InputDecoration(
+      labelText: label,
+      filled: true,
+      fillColor: pageSubtleSurfaceColor(context),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(isCompact ? 12 : 14),
+        borderSide: BorderSide(color: pageBorderColor(context)),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(isCompact ? 12 : 14),
+        borderSide: BorderSide(color: pageBorderColor(context)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(isCompact ? 12 : 14),
+        borderSide: const BorderSide(color: Color(0xFF16A34A), width: 1.4),
+      ),
+    );
+  }
+}

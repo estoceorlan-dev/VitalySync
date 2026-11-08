@@ -1,0 +1,253 @@
+import 'package:flutter/material.dart';
+
+import '../../../../app/main_navigation.dart';
+import '../../../../features/dashboard/data/weekly_user_metrics.dart';
+import '../../../../shared/navigation/main_tab.dart';
+import '../../../../shared/theme/app_page_style.dart';
+import '../../../../shared/widgets/app_skeleton.dart';
+import '../../../../shared/widgets/sensitive_content_guard.dart';
+import 'package:vitalysync/l10n/localized_text.dart';
+
+class WeeklyAnalyticsCard extends StatelessWidget {
+  final String title;
+  final List<WeeklyStatItem> items;
+  final VoidCallback? onViewAll;
+  final bool isLoading;
+
+  const WeeklyAnalyticsCard({
+    super.key,
+    this.title = 'This week',
+    required this.items,
+    this.onViewAll,
+    this.isLoading = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    final cardColor = pageSurfaceColor(context);
+    final titleColor = pagePrimaryTextColor(context);
+    final labelColor = pageSecondaryTextColor(context);
+    final defaultValueColor = pagePrimaryTextColor(context);
+    final linkColor = isDark
+        ? const Color(0xFF82DFFF)
+        : const Color(0xFF2088D8);
+    final borderColor = pageBorderColor(context);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: borderColor),
+        boxShadow: pageCardShadow(context),
+      ),
+      child: AppSkeleton(
+        enabled: isLoading,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                LocalizedText(
+                  title,
+                  style: TextStyle(
+                    fontSize: 15.5,
+                    fontWeight: FontWeight.w700,
+                    color: titleColor,
+                  ),
+                ),
+                TextButton(
+                  onPressed: isLoading
+                      ? null
+                      : () {
+                          final controller = MainNavigationController.maybeOf(
+                            context,
+                          );
+                          if (controller != null) {
+                            controller.onTabSelected(MainTab.dashboard);
+                            return;
+                          }
+
+                          Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const MainNavigation(
+                                initialTab: MainTab.dashboard,
+                              ),
+                            ),
+                          );
+                        },
+                  style: TextButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(0, 0),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: LocalizedText(
+                    'View all',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w500,
+                      color: linkColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SensitiveContentGuard(
+              child: Column(
+                children: List.generate(items.length, (index) {
+                  final item = items[index];
+                  return Padding(
+                    padding: EdgeInsets.only(
+                      bottom: index == items.length - 1 ? 0 : 11,
+                    ),
+                    child: _buildStatRow(
+                      label: item.label,
+                      value: item.value,
+                      labelColor: labelColor,
+                      valueColor: item.valueColor ?? defaultValueColor,
+                      valueWeight: item.valueWeight,
+                    ),
+                  );
+                }),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatRow({
+    required String label,
+    required String value,
+    required Color labelColor,
+    required Color valueColor,
+    FontWeight valueWeight = FontWeight.w700,
+  }) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Expanded(
+          child: LocalizedText(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w400,
+              color: labelColor,
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        LocalizedText(
+          value,
+          textAlign: TextAlign.right,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: valueWeight,
+            color: valueColor,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class HomeWeeklyAnalyticsCard extends StatefulWidget {
+  final int refreshVersion;
+
+  const HomeWeeklyAnalyticsCard({super.key, this.refreshVersion = 0});
+
+  @override
+  State<HomeWeeklyAnalyticsCard> createState() =>
+      _HomeWeeklyAnalyticsCardState();
+}
+
+class _HomeWeeklyAnalyticsCardState extends State<HomeWeeklyAnalyticsCard> {
+  late Future<WeeklyUserMetrics> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    WeeklyUserMetricsService.refreshSignal.addListener(_reload);
+    _future = WeeklyUserMetricsService.loadCurrentWeek();
+  }
+
+  @override
+  void dispose() {
+    WeeklyUserMetricsService.refreshSignal.removeListener(_reload);
+    super.dispose();
+  }
+
+  void _reload() {
+    setState(() => _future = WeeklyUserMetricsService.loadCurrentWeek());
+  }
+
+  @override
+  void didUpdateWidget(covariant HomeWeeklyAnalyticsCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.refreshVersion != widget.refreshVersion) {
+      _future = WeeklyUserMetricsService.loadCurrentWeek(forceRefresh: true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<WeeklyUserMetrics>(
+      future: _future,
+      builder: (context, snapshot) {
+        final metrics = snapshot.data;
+        final items = metrics == null
+            ? const [
+                WeeklyStatItem(label: 'Average sleep', value: 'Loading'),
+                WeeklyStatItem(label: 'Mood trend', value: 'Loading'),
+                WeeklyStatItem(label: 'Exercise days', value: 'Loading'),
+              ]
+            : [
+                WeeklyStatItem(
+                  label: 'Average sleep',
+                  value: metrics.averageSleep > 0
+                      ? '${metrics.averageSleep.toStringAsFixed(1)} hours'
+                      : 'No logs',
+                ),
+                WeeklyStatItem(
+                  label: 'Mood trend',
+                  value: metrics.moodTrendLabel,
+                  valueColor: metrics.moodTrendLabel == 'Improving'
+                      ? const Color(0xFF12A150)
+                      : null,
+                ),
+                WeeklyStatItem(
+                  label: 'Exercise days',
+                  value: '${metrics.exerciseDays} of 7',
+                ),
+              ];
+
+        return WeeklyAnalyticsCard(
+          items: items,
+          isLoading:
+              snapshot.data == null &&
+              snapshot.connectionState == ConnectionState.waiting,
+        );
+      },
+    );
+  }
+}
+
+class WeeklyStatItem {
+  final String label;
+  final String value;
+  final Color? valueColor;
+  final FontWeight valueWeight;
+
+  const WeeklyStatItem({
+    required this.label,
+    required this.value,
+    this.valueColor,
+    this.valueWeight = FontWeight.w700,
+  });
+}

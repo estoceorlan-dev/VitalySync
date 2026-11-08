@@ -1,0 +1,888 @@
+import 'dart:convert';
+import '../../adaptive/data/wellness_content_api.dart';
+
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../../shared/config/api_config.dart';
+import '../../../shared/offline/fetch_policy.dart';
+import '../../../shared/offline/offline_cache_store.dart';
+
+class BurnoutScoreSnapshot {
+  final String scoreDate;
+  final double overallScore;
+  final String riskLevel;
+  final double confidenceScore;
+  final double completenessScore;
+  final double? emotionalExhaustionScore;
+  final double? detachmentScore;
+  final double? reducedAccomplishmentScore;
+  final List<String> missingFields;
+  final List<BurnoutContributingFactor> contributingFactors;
+  final BurnoutWeeklyContext? weeklyContext;
+  final String scoringVersion;
+  final int? baselineEpochId;
+  final BurnoutEvidenceBasis evidenceBasis;
+  final String explanationNote;
+
+  const BurnoutScoreSnapshot({
+    required this.scoreDate,
+    required this.overallScore,
+    required this.riskLevel,
+    required this.confidenceScore,
+    required this.completenessScore,
+    required this.emotionalExhaustionScore,
+    required this.detachmentScore,
+    required this.reducedAccomplishmentScore,
+    required this.missingFields,
+    required this.contributingFactors,
+    required this.weeklyContext,
+    required this.scoringVersion,
+    required this.baselineEpochId,
+    required this.evidenceBasis,
+    required this.explanationNote,
+  });
+
+  factory BurnoutScoreSnapshot.fromJson(Map<String, dynamic> json) {
+    final sourceSnapshot = json['source_snapshot'];
+    final weeklyPulse = sourceSnapshot is Map
+        ? sourceSnapshot['weekly_pulse']
+        : null;
+    final evidenceBasis = json['evidence_basis'];
+
+    return BurnoutScoreSnapshot(
+      scoreDate: json['score_date']?.toString() ?? '',
+      overallScore: _parseDouble(json['overall_score']),
+      riskLevel: json['risk_level']?.toString() ?? 'moderate',
+      confidenceScore: _parseDouble(json['confidence_score']),
+      completenessScore: _parseDouble(json['completeness_score']),
+      emotionalExhaustionScore: _parseOptionalDouble(
+        json['emotional_exhaustion_score'],
+      ),
+      detachmentScore: _parseOptionalDouble(json['detachment_score']),
+      reducedAccomplishmentScore: _parseOptionalDouble(
+        json['reduced_accomplishment_score'],
+      ),
+      missingFields: (json['missing_fields'] as List<dynamic>? ?? const [])
+          .map((item) => item.toString())
+          .toList(),
+      contributingFactors:
+          (json['contributing_factors'] as List<dynamic>? ?? const [])
+              .whereType<Map>()
+              .map(
+                (item) => BurnoutContributingFactor.fromJson(
+                  Map<String, dynamic>.from(item),
+                ),
+              )
+              .toList(),
+      weeklyContext: weeklyPulse is Map
+          ? BurnoutWeeklyContext.fromJson(
+              Map<String, dynamic>.from(weeklyPulse),
+            )
+          : null,
+      scoringVersion: json['scoring_version']?.toString() ?? '',
+      baselineEpochId: _parseOptionalInt(json['baseline_epoch_id']),
+      evidenceBasis: evidenceBasis is Map
+          ? BurnoutEvidenceBasis.fromJson(
+              Map<String, dynamic>.from(evidenceBasis),
+            )
+          : BurnoutEvidenceBasis.empty(
+              scoringVersion: json['scoring_version']?.toString() ?? '',
+              confidenceScore: _parseDouble(json['confidence_score']),
+              missingFields:
+                  (json['missing_fields'] as List<dynamic>? ?? const [])
+                      .map((item) => item.toString())
+                      .toList(),
+            ),
+      explanationNote:
+          json['explanation_note']?.toString() ??
+          'This is a pattern estimate based on your recent logs, not a medical diagnosis.',
+    );
+  }
+}
+
+class BurnoutEvidenceBasis {
+  final String scoringVersion;
+  final double? baselineWeight;
+  final String? baselineEpochStartedAt;
+  final String? windowUsed;
+  final int weeklyPulseCountSinceEpoch;
+  final double? logCoveragePercent;
+  final double confidenceScore;
+  final List<String> missingFields;
+  final List<String> topFactorKeys;
+
+  const BurnoutEvidenceBasis({
+    required this.scoringVersion,
+    required this.baselineWeight,
+    required this.baselineEpochStartedAt,
+    required this.windowUsed,
+    required this.weeklyPulseCountSinceEpoch,
+    required this.logCoveragePercent,
+    required this.confidenceScore,
+    required this.missingFields,
+    required this.topFactorKeys,
+  });
+
+  factory BurnoutEvidenceBasis.empty({
+    required String scoringVersion,
+    required double confidenceScore,
+    required List<String> missingFields,
+  }) {
+    return BurnoutEvidenceBasis(
+      scoringVersion: scoringVersion,
+      baselineWeight: null,
+      baselineEpochStartedAt: null,
+      windowUsed: null,
+      weeklyPulseCountSinceEpoch: 0,
+      logCoveragePercent: null,
+      confidenceScore: confidenceScore,
+      missingFields: missingFields,
+      topFactorKeys: const <String>[],
+    );
+  }
+
+  factory BurnoutEvidenceBasis.fromJson(Map<String, dynamic> json) {
+    return BurnoutEvidenceBasis(
+      scoringVersion: json['scoring_version']?.toString() ?? '',
+      baselineWeight: _parseOptionalDouble(json['baseline_weight']),
+      baselineEpochStartedAt: json['baseline_epoch_started_at']?.toString(),
+      windowUsed: json['window_used']?.toString(),
+      weeklyPulseCountSinceEpoch: _parseInt(
+        json['weekly_pulse_count_since_epoch'],
+      ),
+      logCoveragePercent: _parseOptionalDouble(json['log_coverage_percent']),
+      confidenceScore: _parseDouble(json['confidence_score']),
+      missingFields:
+          (json['missing_fields'] as List<dynamic>? ?? const <dynamic>[])
+              .map((item) => item.toString())
+              .toList(),
+      topFactorKeys:
+          (json['top_factor_keys'] as List<dynamic>? ?? const <dynamic>[])
+              .map((item) => item.toString())
+              .toList(),
+    );
+  }
+}
+
+class BurnoutWeeklyContext {
+  final String responseDate;
+  final String dueDate;
+  final int? ageDays;
+  final String freshness;
+
+  const BurnoutWeeklyContext({
+    required this.responseDate,
+    required this.dueDate,
+    required this.ageDays,
+    required this.freshness,
+  });
+
+  factory BurnoutWeeklyContext.fromJson(Map<String, dynamic> json) {
+    return BurnoutWeeklyContext(
+      responseDate: json['response_date']?.toString() ?? '',
+      dueDate: json['due_date']?.toString() ?? '',
+      ageDays: _parseOptionalInt(json['age_days']),
+      freshness: json['freshness']?.toString() ?? 'unknown',
+    );
+  }
+
+  bool get isCurrent => freshness == 'current';
+}
+
+class BurnoutContributingFactor {
+  final String key;
+  final String label;
+  final double score;
+  final String direction;
+
+  const BurnoutContributingFactor({
+    required this.key,
+    required this.label,
+    required this.score,
+    required this.direction,
+  });
+
+  factory BurnoutContributingFactor.fromJson(Map<String, dynamic> json) {
+    return BurnoutContributingFactor(
+      key: json['key']?.toString() ?? '',
+      label: json['label']?.toString() ?? '',
+      score: _parseDouble(json['score']),
+      direction: json['direction']?.toString() ?? '',
+    );
+  }
+}
+
+class BurnoutPatternPoint {
+  final String scoreDate;
+  final double overallScore;
+  final String riskLevel;
+  final double confidenceScore;
+
+  const BurnoutPatternPoint({
+    required this.scoreDate,
+    required this.overallScore,
+    required this.riskLevel,
+    required this.confidenceScore,
+  });
+
+  factory BurnoutPatternPoint.fromJson(Map<String, dynamic> json) {
+    return BurnoutPatternPoint(
+      scoreDate: json['score_date']?.toString() ?? '',
+      overallScore: _parseDouble(json['overall_score']),
+      riskLevel: json['risk_level']?.toString() ?? 'moderate',
+      confidenceScore: _parseDouble(json['confidence_score']),
+    );
+  }
+}
+
+class BurnoutWindowSummary {
+  final int windowDays;
+  final double? averageScore;
+  final double? latestScore;
+  final double? deltaFromStart;
+  final double? slopePerDay;
+  final double coveragePercent;
+  final double? averageConfidenceScore;
+  final String trendDirection;
+  final String? dominantDimensionLabel;
+  final List<BurnoutPatternPoint> points;
+
+  const BurnoutWindowSummary({
+    required this.windowDays,
+    required this.averageScore,
+    required this.latestScore,
+    required this.deltaFromStart,
+    required this.slopePerDay,
+    required this.coveragePercent,
+    required this.averageConfidenceScore,
+    required this.trendDirection,
+    required this.dominantDimensionLabel,
+    required this.points,
+  });
+
+  factory BurnoutWindowSummary.fromJson(Map<String, dynamic> json) {
+    final dominantDimension = json['dominant_dimension'];
+
+    return BurnoutWindowSummary(
+      windowDays: _parseInt(json['window_days']),
+      averageScore: _parseOptionalDouble(json['average_score']),
+      latestScore: _parseOptionalDouble(json['latest_score']),
+      deltaFromStart: _parseOptionalDouble(json['delta_from_start']),
+      slopePerDay: _parseOptionalDouble(json['slope_per_day']),
+      coveragePercent: _parseDouble(json['coverage_percent']),
+      averageConfidenceScore: _parseOptionalDouble(
+        json['average_confidence_score'],
+      ),
+      trendDirection: json['trend_direction']?.toString() ?? 'stable',
+      dominantDimensionLabel: dominantDimension is Map
+          ? dominantDimension['label']?.toString()
+          : null,
+      points: (json['points'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map(
+            (item) =>
+                BurnoutPatternPoint.fromJson(Map<String, dynamic>.from(item)),
+          )
+          .toList(),
+    );
+  }
+}
+
+class BurnoutPatternInsight {
+  final String type;
+  final String severity;
+  final String title;
+  final String message;
+  final String recommendedFocus;
+
+  const BurnoutPatternInsight({
+    required this.type,
+    required this.severity,
+    required this.title,
+    required this.message,
+    required this.recommendedFocus,
+  });
+
+  factory BurnoutPatternInsight.fromJson(Map<String, dynamic> json) {
+    return BurnoutPatternInsight(
+      type: json['type']?.toString() ?? 'stable_current_pattern',
+      severity: json['severity']?.toString() ?? 'low',
+      title: json['title']?.toString() ?? 'Pattern stable',
+      message: json['message']?.toString() ?? '',
+      recommendedFocus: json['recommended_focus']?.toString() ?? 'maintenance',
+    );
+  }
+}
+
+class BurnoutAdaptiveState {
+  final String state;
+  final String label;
+  final String priority;
+  final String recommendedFocus;
+  final double confidenceScore;
+  final String reason;
+
+  const BurnoutAdaptiveState({
+    required this.state,
+    required this.label,
+    required this.priority,
+    required this.recommendedFocus,
+    required this.confidenceScore,
+    required this.reason,
+  });
+
+  factory BurnoutAdaptiveState.fromJson(Map<String, dynamic> json) {
+    return BurnoutAdaptiveState(
+      state: json['state']?.toString() ?? 'insufficient_data',
+      label: json['label']?.toString() ?? 'More data needed',
+      priority: json['priority']?.toString() ?? 'low',
+      recommendedFocus: json['recommended_focus']?.toString() ?? 'maintenance',
+      confidenceScore: _parseDouble(json['confidence_score']),
+      reason: json['reason']?.toString() ?? '',
+    );
+  }
+}
+
+class BurnoutBaselineEpoch {
+  final int id;
+  final String startedAt;
+  final String resetReason;
+
+  const BurnoutBaselineEpoch({
+    required this.id,
+    required this.startedAt,
+    required this.resetReason,
+  });
+
+  bool get isRefresh =>
+      resetReason == 'thirty_day_return' ||
+      resetReason == 'manual_baseline_refresh';
+
+  factory BurnoutBaselineEpoch.fromJson(Map<String, dynamic> json) {
+    return BurnoutBaselineEpoch(
+      id: _parseInt(json['id']),
+      startedAt: json['started_at']?.toString() ?? '',
+      resetReason: json['reset_reason']?.toString() ?? '',
+    );
+  }
+}
+
+class BurnoutPatternSummary {
+  final BurnoutScoreSnapshot? latestScore;
+  final BurnoutBaselineEpoch? baselineEpoch;
+  final BurnoutAdaptiveState adaptiveState;
+  final Map<String, BurnoutWindowSummary> windows;
+  final List<BurnoutPatternInsight> patterns;
+  final List<BurnoutPatternPoint> timeline;
+
+  const BurnoutPatternSummary({
+    required this.latestScore,
+    required this.baselineEpoch,
+    required this.adaptiveState,
+    required this.windows,
+    required this.patterns,
+    required this.timeline,
+  });
+
+  factory BurnoutPatternSummary.fromJson(Map<String, dynamic> json) {
+    final rawWindows = json['windows'];
+    final windows = <String, BurnoutWindowSummary>{};
+    if (rawWindows is Map) {
+      for (final entry in rawWindows.entries) {
+        final value = entry.value;
+        if (value is Map) {
+          windows[entry.key.toString()] = BurnoutWindowSummary.fromJson(
+            Map<String, dynamic>.from(value),
+          );
+        }
+      }
+    }
+
+    final latestScore = json['latest_score'];
+    final adaptiveState = json['adaptive_state'];
+    final baselineEpoch = json['baseline_epoch'];
+
+    return BurnoutPatternSummary(
+      latestScore: latestScore is Map
+          ? BurnoutScoreSnapshot.fromJson(
+              Map<String, dynamic>.from(latestScore),
+            )
+          : null,
+      baselineEpoch: baselineEpoch is Map
+          ? BurnoutBaselineEpoch.fromJson(
+              Map<String, dynamic>.from(baselineEpoch),
+            )
+          : null,
+      adaptiveState: adaptiveState is Map
+          ? BurnoutAdaptiveState.fromJson(
+              Map<String, dynamic>.from(adaptiveState),
+            )
+          : const BurnoutAdaptiveState(
+              state: 'insufficient_data',
+              label: 'More data needed',
+              priority: 'low',
+              recommendedFocus: 'data_completion',
+              confidenceScore: 0,
+              reason: '',
+            ),
+      windows: windows,
+      patterns: (json['patterns'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map(
+            (item) =>
+                BurnoutPatternInsight.fromJson(Map<String, dynamic>.from(item)),
+          )
+          .toList(),
+      timeline: (json['timeline'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map(
+            (item) =>
+                BurnoutPatternPoint.fromJson(Map<String, dynamic>.from(item)),
+          )
+          .toList(),
+    );
+  }
+
+  BurnoutWindowSummary? windowForDays(int days) {
+    return windows['${days}_day'];
+  }
+}
+
+class BurnoutScoreApi {
+  static const Duration _requestTimeout = ApiRequestTimeouts.standard;
+  static const Duration _calculationTimeout = ApiRequestTimeouts.coldStart;
+  static const String _latestScoreCache = 'burnout_latest_score';
+  static const String _scoreHistoryCache = 'burnout_score_history';
+  static const String _patternSummaryCache = 'burnout_pattern_summary';
+  static final ValueNotifier<int> refreshSignal = ValueNotifier<int>(0);
+  static int inputsRevision = 0;
+
+  static Future<BurnoutScoreSnapshot?> fetchLatestScore({
+    bool forceRefresh = false,
+  }) async {
+    final userId = await _storedUserId();
+    if (userId == null) {
+      return null;
+    }
+
+    final cachedSnapshot = await OfflineCacheStore.readLatestJsonSnapshot(
+      namespace: _latestScoreCache,
+      scope: userId.toString(),
+    );
+    final cachedScore = cachedSnapshot?.data['score'];
+    if (!forceRefresh &&
+        cachedSnapshot?.data.containsKey('score') == true &&
+        cachedSnapshot?.isFresh(FetchPolicy.fiveMinutes.maxAge) == true) {
+      return cachedScore is Map
+          ? BurnoutScoreSnapshot.fromJson(
+              Map<String, dynamic>.from(cachedScore),
+            )
+          : null;
+    }
+
+    try {
+      final result = await CachedJsonFetch.load<BurnoutScoreSnapshot?>(
+        namespace: _latestScoreCache,
+        scope: userId.toString(),
+        policy: FetchPolicy.fiveMinutes,
+        forceRefresh: true,
+        parser: (data) => data['score'] is Map
+            ? BurnoutScoreSnapshot.fromJson(
+                Map<String, dynamic>.from(data['score'] as Map),
+              )
+            : null,
+        fetcher: () async {
+          final response = await http
+              .get(
+                Uri.parse(
+                  '${ApiConfig.burnout('/scores/latest')}?user_id=$userId',
+                ),
+                headers: await ApiConfig.jsonHeaders(),
+              )
+              .timeout(_requestTimeout);
+
+          final data = _decodeResponseMap(response);
+          if (response.statusCode != 200 || data['has_score'] is! bool) {
+            throw Exception('Failed to fetch burnout score');
+          }
+          return {'score': data['has_score'] == true ? data['score'] : null};
+        },
+      );
+      return result?.data;
+    } catch (_) {
+      return _readCachedLatestScore(userId);
+    }
+  }
+
+  static Future<BurnoutScoreSnapshot?> recalculateToday() async {
+    final userId = await _storedUserId();
+    if (userId == null) {
+      return null;
+    }
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse(ApiConfig.burnout('/scores/recalculate')),
+            headers: await ApiConfig.jsonHeaders(),
+            body: jsonEncode({'user_id': userId, 'score_date': _todayKey()}),
+          )
+          .timeout(_calculationTimeout);
+
+      final data = _decodeResponseMap(response);
+      if (response.statusCode != 200) {
+        return await _readCachedLatestScore(userId);
+      }
+
+      final score = data['score'];
+      if (score is! Map) {
+        return await _readCachedLatestScore(userId);
+      }
+
+      final scoreMap = Map<String, dynamic>.from(score);
+      await _cacheJson(_latestScoreCache, userId.toString(), {
+        'score': scoreMap,
+      });
+      return BurnoutScoreSnapshot.fromJson(scoreMap);
+    } catch (_) {
+      return _readCachedLatestScore(userId);
+    }
+  }
+
+  static Future<List<BurnoutScoreSnapshot>> fetchHistory({
+    String? startDate,
+    String? endDate,
+    int limit = 30,
+  }) async {
+    final userId = await _storedUserId();
+    if (userId == null) {
+      return const [];
+    }
+
+    final query = <String, String>{
+      'user_id': userId.toString(),
+      'limit': limit.toString(),
+    };
+    if (startDate != null) {
+      query['start'] = startDate;
+    }
+    if (endDate != null) {
+      query['end'] = endDate;
+    }
+    final uri = Uri.parse(
+      ApiConfig.burnout('/scores/history'),
+    ).replace(queryParameters: query);
+    final cacheScope = _historyScope(
+      userId: userId,
+      startDate: startDate,
+      endDate: endDate,
+      limit: limit,
+    );
+
+    final cachedSnapshot = await OfflineCacheStore.readLatestJsonSnapshot(
+      namespace: _scoreHistoryCache,
+      scope: cacheScope,
+    );
+    if (cachedSnapshot?.isFresh(FetchPolicy.fiveMinutes.maxAge) == true) {
+      return _parseHistory(cachedSnapshot!.data);
+    }
+
+    try {
+      final response = await http
+          .get(uri, headers: await ApiConfig.jsonHeaders())
+          .timeout(_requestTimeout);
+
+      final data = _decodeResponseMap(response);
+      if (response.statusCode != 200) {
+        return await _readCachedHistory(cacheScope);
+      }
+
+      final rawScores = data['scores'] as List<dynamic>? ?? const [];
+      await _cacheJson(_scoreHistoryCache, cacheScope, {'scores': rawScores});
+      return rawScores
+          .whereType<Map>()
+          .map(
+            (item) =>
+                BurnoutScoreSnapshot.fromJson(Map<String, dynamic>.from(item)),
+          )
+          .toList();
+    } catch (_) {
+      return _readCachedHistory(cacheScope);
+    }
+  }
+
+  static Future<BurnoutPatternSummary?> fetchPatternSummary({
+    String? endDate,
+    bool forceRefresh = false,
+  }) async {
+    final revision = inputsRevision;
+    final userId = await _storedUserId();
+    if (userId == null) {
+      return null;
+    }
+
+    final effectiveEndDate = endDate ?? _todayKey();
+    final cacheScope = _patternScope(userId: userId, endDate: effectiveEndDate);
+    final cachedSnapshot = await OfflineCacheStore.readLatestJsonSnapshot(
+      namespace: _patternSummaryCache,
+      scope: cacheScope,
+    );
+    if (!forceRefresh &&
+        cachedSnapshot?.isFresh(FetchPolicy.fiveMinutes.maxAge) == true) {
+      return BurnoutPatternSummary.fromJson(cachedSnapshot!.data);
+    }
+
+    try {
+      final result = await CachedJsonFetch.load<BurnoutPatternSummary>(
+        namespace: _patternSummaryCache,
+        scope: cacheScope,
+        policy: FetchPolicy.fiveMinutes,
+        forceRefresh: true,
+        parser: BurnoutPatternSummary.fromJson,
+        fetcher: () async {
+          final uri = Uri.parse(ApiConfig.burnout('/patterns/summary')).replace(
+            queryParameters: {
+              'user_id': userId.toString(),
+              'end': effectiveEndDate,
+            },
+          );
+          final response = await http
+              .get(uri, headers: await ApiConfig.jsonHeaders())
+              .timeout(_requestTimeout);
+
+          final data = _decodeResponseMap(response);
+          if (response.statusCode != 200) {
+            throw Exception('Failed to fetch burnout patterns');
+          }
+          final latestScore = data['latest_score'];
+          if (latestScore is Map &&
+              effectiveEndDate == _todayKey() &&
+              revision == inputsRevision) {
+            // Preserve the last calculated estimate when an offline save
+            // invalidates the trend. It remains dated until syncing succeeds.
+            await _cacheJson(_latestScoreCache, userId.toString(), {
+              'score': Map<String, dynamic>.from(latestScore),
+            });
+          }
+          return data;
+        },
+      );
+      return result?.data;
+    } catch (_) {
+      return _readCachedPatternSummary(cacheScope);
+    }
+  }
+
+  static Future<void> markInputsChanged({
+    Map<String, dynamic>? latestScore,
+    bool clearLatestScore = false,
+    bool preserveScoreCache = false,
+  }) async {
+    inputsRevision++;
+    final userId = await _storedUserId();
+    if (userId == null) {
+      return;
+    }
+
+    await Future.wait([
+      if (!preserveScoreCache)
+        CachedJsonFetch.invalidateScopePrefix(
+          namespace: _scoreHistoryCache,
+          scopePrefix: '${userId}_',
+        ),
+      if (!preserveScoreCache)
+        CachedJsonFetch.invalidateScopePrefix(
+          namespace: _patternSummaryCache,
+          scopePrefix: '${userId}_',
+        ),
+      CachedJsonFetch.invalidateScopePrefix(
+        namespace: 'weekly_user_metrics',
+        scopePrefix: '${userId}_',
+      ),
+      if (clearLatestScore || latestScore != null)
+        CachedJsonFetch.invalidate(
+          namespace: _latestScoreCache,
+          scope: userId.toString(),
+        ),
+    ]);
+
+    if (latestScore != null) {
+      await _cacheJson(_latestScoreCache, userId.toString(), {
+        'score': latestScore,
+      });
+    }
+
+    await WellnessContentApi.invalidate();
+    refreshSignal.value++;
+  }
+
+  static Future<void> _cacheJson(
+    String namespace,
+    String scope,
+    Map<String, dynamic> data,
+  ) {
+    return OfflineCacheStore.saveJson(
+      namespace: namespace,
+      scope: scope,
+      data: data,
+    );
+  }
+
+  static Future<BurnoutScoreSnapshot?> _readCachedLatestScore(
+    int userId,
+  ) async {
+    final data = await OfflineCacheStore.readLatestJson(
+      namespace: _latestScoreCache,
+      scope: userId.toString(),
+    );
+    var score = data?['score'];
+    if (data == null) {
+      final patternData = await OfflineCacheStore.readLatestJson(
+        namespace: _patternSummaryCache,
+        scope: _patternScope(userId: userId, endDate: _todayKey()),
+      );
+      score = patternData?['latest_score'];
+    }
+
+    if (score is! Map) {
+      return null;
+    }
+
+    return BurnoutScoreSnapshot.fromJson(Map<String, dynamic>.from(score));
+  }
+
+  static Future<List<BurnoutScoreSnapshot>> _readCachedHistory(
+    String scope,
+  ) async {
+    final data = await OfflineCacheStore.readLatestJson(
+      namespace: _scoreHistoryCache,
+      scope: scope,
+    );
+    if (data == null) {
+      return const [];
+    }
+
+    return _parseHistory(data);
+  }
+
+  static List<BurnoutScoreSnapshot> _parseHistory(Map<String, dynamic> data) {
+    final scores = data['scores'];
+    if (scores is! List) {
+      return const [];
+    }
+
+    return scores
+        .whereType<Map>()
+        .map(
+          (item) =>
+              BurnoutScoreSnapshot.fromJson(Map<String, dynamic>.from(item)),
+        )
+        .toList();
+  }
+
+  static Future<BurnoutPatternSummary?> _readCachedPatternSummary(
+    String scope,
+  ) async {
+    final data = await OfflineCacheStore.readLatestJson(
+      namespace: _patternSummaryCache,
+      scope: scope,
+    );
+    if (data == null) {
+      return null;
+    }
+
+    return BurnoutPatternSummary.fromJson(data);
+  }
+
+  static Future<int?> _storedUserId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('user_id');
+  }
+
+  static String _todayKey() {
+    final now = DateTime.now();
+    final month = now.month.toString().padLeft(2, '0');
+    final day = now.day.toString().padLeft(2, '0');
+    return '${now.year}-$month-$day';
+  }
+
+  static String _historyScope({
+    required int userId,
+    required String? startDate,
+    required String? endDate,
+    required int limit,
+  }) {
+    return '${userId}_${startDate ?? 'any'}_${endDate ?? 'any'}_$limit';
+  }
+
+  static String _patternScope({required int userId, required String endDate}) {
+    return '${userId}_$endDate';
+  }
+
+  static Map<String, dynamic> _decodeResponseMap(http.Response response) {
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {
+      return const {};
+    }
+
+    return const {};
+  }
+}
+
+double _parseDouble(dynamic value) {
+  if (value is double) {
+    return value;
+  }
+
+  if (value is num) {
+    return value.toDouble();
+  }
+
+  if (value is String) {
+    return double.tryParse(value) ?? 0;
+  }
+
+  return 0;
+}
+
+double? _parseOptionalDouble(dynamic value) {
+  if (value == null) {
+    return null;
+  }
+
+  return _parseDouble(value);
+}
+
+int _parseInt(dynamic value) {
+  if (value is int) {
+    return value;
+  }
+
+  if (value is num) {
+    return value.toInt();
+  }
+
+  if (value is String) {
+    return int.tryParse(value) ?? 0;
+  }
+
+  return 0;
+}
+
+int? _parseOptionalInt(dynamic value) {
+  if (value == null || value == '') {
+    return null;
+  }
+
+  if (value is num) {
+    return value.toInt();
+  }
+
+  return int.tryParse(value.toString());
+}

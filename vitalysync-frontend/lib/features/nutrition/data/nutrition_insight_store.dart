@@ -1,0 +1,337 @@
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'nutrition_coach.dart';
+import 'nutrition_feedback_preferences.dart';
+
+class NutritionInsightStore {
+  NutritionInsightStore._();
+
+  static final NutritionInsightStore instance = NutritionInsightStore._();
+
+  static const String _lastInsightKey = 'nutrition_last_insight';
+  static const String _assistantInsightKey = 'nutrition_assistant_insight';
+  static const String _messageHistoryKey = 'nutrition_message_history';
+  static const String _lastPushDateKey = 'nutrition_last_push_date';
+  static const String _assistantShownDateKey = 'nutrition_assistant_shown_date';
+  static const String _insightFeedbackKey = 'nutrition_insight_feedback';
+
+  Future<NutritionInsight?> readLastInsight() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_lastInsightKey);
+    if (raw == null || raw.isEmpty) {
+      return null;
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        return NutritionInsight.fromJson(Map<String, dynamic>.from(decoded));
+      }
+    } catch (_) {
+      return null;
+    }
+
+    return null;
+  }
+
+  Future<void> saveInsight(NutritionInsight insight) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastInsightKey, jsonEncode(insight.toJson()));
+    await rememberMessage(insight.message, at: insight.generatedAt);
+  }
+
+  Future<NutritionInsight?> readAssistantInsightForToday({
+    DateTime? now,
+    Duration? maxAge,
+    bool allowStale = true,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final raw = prefs.getString(_assistantInsightKey);
+    if (raw == null || raw.isEmpty) {
+      return null;
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return null;
+      }
+
+      final data = Map<String, dynamic>.from(decoded);
+      if (data['user_id'] != prefs.getInt('user_id') ||
+          data['language'] != (prefs.getString('app_language') ?? 'english')) {
+        return null;
+      }
+      if (data['date']?.toString() != _dateKey(now ?? DateTime.now())) {
+        return null;
+      }
+
+      final insight = data['insight'];
+      if (insight is Map) {
+        final parsedInsight = NutritionInsight.fromJson(
+          Map<String, dynamic>.from(insight),
+        );
+        if (maxAge != null &&
+            !allowStale &&
+            !_isFreshAssistantCache(data, parsedInsight, maxAge, now)) {
+          return null;
+        }
+
+        return parsedInsight;
+      }
+    } catch (_) {
+      return null;
+    }
+
+    return null;
+  }
+
+  Future<void> saveAssistantInsightForToday(
+    NutritionInsight insight, {
+    DateTime? now,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _assistantInsightKey,
+      jsonEncode({
+        'user_id': prefs.getInt('user_id'),
+        'language': prefs.getString('app_language') ?? 'english',
+        'date': _dateKey(now ?? DateTime.now()),
+        'cached_at': DateTime.now().toIso8601String(),
+        'insight': insight.toJson(),
+      }),
+    );
+  }
+
+  Future<bool> canUseMessage(
+    String message, {
+    DateTime? now,
+    Duration minGap = const Duration(hours: 48),
+  }) async {
+    final normalized = _normalizeMessage(message);
+    if (normalized.isEmpty) {
+      return false;
+    }
+
+    final history = await _readMessageHistory();
+    final currentTime = now ?? DateTime.now();
+    final lastUsed = history[normalized];
+    if (lastUsed == null) {
+      return true;
+    }
+
+    return currentTime.difference(lastUsed) >= minGap;
+  }
+
+  Future<void> rememberMessage(String message, {DateTime? at}) async {
+    final normalized = _normalizeMessage(message);
+    if (normalized.isEmpty) {
+      return;
+    }
+
+    final currentTime = at ?? DateTime.now();
+    final history = await _readMessageHistory();
+    history[normalized] = currentTime;
+
+    final cutoff = currentTime.subtract(const Duration(days: 14));
+    history.removeWhere((_, value) => value.isBefore(cutoff));
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _messageHistoryKey,
+      jsonEncode({
+        for (final entry in history.entries)
+          entry.key: entry.value.toIso8601String(),
+      }),
+    );
+  }
+
+  Future<bool> hasSentNutritionPushToday({DateTime? now}) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_lastPushDateKey) == _dateKey(now ?? DateTime.now());
+  }
+
+  Future<void> markNutritionPushSentToday({DateTime? now}) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastPushDateKey, _dateKey(now ?? DateTime.now()));
+  }
+
+  Future<bool> hasShownAssistantToday({DateTime? now}) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_assistantShownDateKey) ==
+        _dateKey(now ?? DateTime.now());
+  }
+
+  Future<void> markAssistantShownToday({DateTime? now}) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _assistantShownDateKey,
+      _dateKey(now ?? DateTime.now()),
+    );
+  }
+
+  Future<String?> readFeedbackStatus(String insightId) async {
+    final history = await _readFeedbackHistory();
+    return history[insightId]?['status']?.toString();
+  }
+
+  Future<void> saveFeedbackStatus(
+    String insightId,
+    String status, {
+    Map<String, dynamic> metadata = const <String, dynamic>{},
+    DateTime? now,
+  }) async {
+    final history = await _readFeedbackHistory();
+    history[insightId] = {
+      'status': status,
+      'updated_at': (now ?? DateTime.now()).toIso8601String(),
+      'metadata': {
+        if (metadata['macro_focus'] != null)
+          'macro_focus': metadata['macro_focus'],
+        if (metadata['food_group'] != null)
+          'food_group': metadata['food_group'],
+        if (metadata['nutrition_nudge_type'] != null)
+          'nutrition_nudge_type': metadata['nutrition_nudge_type'],
+      },
+    };
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_insightFeedbackKey, jsonEncode(history));
+  }
+
+  Future<NutritionFeedbackPreferences> readRecentFeedbackPreferences({
+    DateTime? now,
+  }) async {
+    final current = now ?? DateTime.now();
+    final history = await _readFeedbackHistory();
+    final dismissedMacroFocuses = <String>{};
+    final dismissedFoodGroups = <String>{};
+    final dismissedNudgeTypes = <String>{};
+    final acceptedMacroFocuses = <String>{};
+    final acceptedFoodGroups = <String>{};
+    final acceptedNudgeTypes = <String>{};
+
+    for (final event in history.values) {
+      final updatedAt = DateTime.tryParse(
+        event['updated_at']?.toString() ?? '',
+      );
+      if (updatedAt == null) {
+        continue;
+      }
+      final age = current.difference(updatedAt);
+      if (age.isNegative) {
+        continue;
+      }
+
+      final metadata = event['metadata'] is Map
+          ? Map<String, dynamic>.from(event['metadata'] as Map)
+          : const <String, dynamic>{};
+      final status = event['status']?.toString();
+      if (status == 'dismissed' && age <= const Duration(hours: 48)) {
+        _addDimension(dismissedMacroFocuses, metadata['macro_focus']);
+        _addDimension(dismissedFoodGroups, metadata['food_group']);
+        _addDimension(dismissedNudgeTypes, metadata['nutrition_nudge_type']);
+      }
+      if ((status == 'accepted' || status == 'completed') &&
+          age <= const Duration(days: 14)) {
+        _addDimension(acceptedMacroFocuses, metadata['macro_focus']);
+        _addDimension(acceptedFoodGroups, metadata['food_group']);
+        _addDimension(acceptedNudgeTypes, metadata['nutrition_nudge_type']);
+      }
+    }
+
+    return NutritionFeedbackPreferences(
+      dismissedMacroFocuses: dismissedMacroFocuses,
+      dismissedFoodGroups: dismissedFoodGroups,
+      dismissedNudgeTypes: dismissedNudgeTypes,
+      acceptedMacroFocuses: acceptedMacroFocuses,
+      acceptedFoodGroups: acceptedFoodGroups,
+      acceptedNudgeTypes: acceptedNudgeTypes,
+    );
+  }
+
+  Future<Map<String, DateTime>> _readMessageHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_messageHistoryKey);
+    if (raw == null || raw.isEmpty) {
+      return <String, DateTime>{};
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return <String, DateTime>{};
+      }
+
+      final history = <String, DateTime>{};
+      for (final entry in decoded.entries) {
+        final parsed = DateTime.tryParse(entry.value.toString());
+        if (parsed != null) {
+          history[entry.key.toString()] = parsed;
+        }
+      }
+      return history;
+    } catch (_) {
+      return <String, DateTime>{};
+    }
+  }
+
+  Future<Map<String, Map<String, dynamic>>> _readFeedbackHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_insightFeedbackKey);
+    if (raw == null || raw.isEmpty) {
+      return <String, Map<String, dynamic>>{};
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return <String, Map<String, dynamic>>{};
+      }
+
+      return decoded.map((key, value) {
+        final normalizedValue = value is Map
+            ? Map<String, dynamic>.from(value)
+            : <String, dynamic>{};
+        return MapEntry(key.toString(), normalizedValue);
+      });
+    } catch (_) {
+      return <String, Map<String, dynamic>>{};
+    }
+  }
+
+  String _normalizeMessage(String message) {
+    return message.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
+  }
+
+  void _addDimension(Set<String> target, Object? value) {
+    final normalized = value?.toString().trim() ?? '';
+    if (normalized.isNotEmpty) {
+      target.add(normalized);
+    }
+  }
+
+  bool _isFreshAssistantCache(
+    Map<String, dynamic> data,
+    NutritionInsight insight,
+    Duration maxAge,
+    DateTime? now,
+  ) {
+    final cachedAt =
+        DateTime.tryParse(data['cached_at']?.toString() ?? '') ??
+        insight.generatedAt;
+
+    return (now ?? DateTime.now()).difference(cachedAt) <= maxAge;
+  }
+
+  String _dateKey(DateTime date) {
+    return DateTime(
+      date.year,
+      date.month,
+      date.day,
+    ).toIso8601String().substring(0, 10);
+  }
+}

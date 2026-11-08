@@ -1,0 +1,681 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+
+import '../../../../app/main_navigation.dart';
+import '../../../../shared/goals/user_goals.dart';
+import '../../../../shared/navigation/main_tab.dart';
+import '../../../../shared/preferences/user_session.dart';
+import '../../../../shared/theme/app_page_style.dart';
+import '../../../../shared/widgets/app_skeleton.dart';
+import '../../../../shared/widgets/reveal_on_build.dart';
+import '../../data/nutrition_api.dart';
+import '../../data/nutrition_image_processor.dart';
+import '../../data/nutrition_meal_suggestion_store.dart';
+import '../../data/nutrition_reminder_engine.dart';
+import '../widgets/log_new_meal_card.dart';
+import '../widgets/macro_balance_card.dart';
+import '../widgets/nutrition_header_card.dart';
+import '../widgets/nutrition_quantity_field.dart';
+import '../widgets/nutrition_review_dialog.dart';
+import '../widgets/today_nutrition_card.dart';
+import '../widgets/todays_meals_card.dart';
+import 'package:vitalysync/l10n/localized_text.dart';
+
+part 'manual_log_dialog.dart';
+
+const List<String> _standardNutritionMealTypes = [
+  'breakfast',
+  'lunch',
+  'dinner',
+];
+
+String _timeBasedMealType([DateTime? now]) {
+  final localNow = now ?? DateTime.now();
+  final hour = localNow.hour;
+
+  if (hour >= 4 && hour < 11) {
+    return 'breakfast';
+  }
+  if (hour >= 11 && hour < 17) {
+    return 'lunch';
+  }
+  return 'dinner';
+}
+
+String _recommendedMealType(DailyNutritionSummary summary) {
+  final preferredMealType = _timeBasedMealType();
+  final preferredIndex = _standardNutritionMealTypes.indexOf(preferredMealType);
+  final searchStart = preferredIndex < 0 ? 0 : preferredIndex;
+
+  for (final mealType in _standardNutritionMealTypes.skip(searchStart)) {
+    if (summary.logged[mealType] != true) {
+      return mealType;
+    }
+  }
+
+  return 'dinner';
+}
+
+bool _isLoggedStandardMeal(Map<String, bool> loggedMealTypes, String mealType) {
+  return mealType != 'snack' &&
+      _standardNutritionMealTypes.contains(mealType) &&
+      loggedMealTypes[mealType] == true;
+}
+
+String _mealTypeLabel(String mealType) {
+  switch (mealType) {
+    case 'breakfast':
+      return 'Breakfast';
+    case 'lunch':
+      return 'Lunch';
+    case 'dinner':
+      return 'Dinner';
+    case 'snack':
+      return 'Snack';
+    default:
+      return 'Meal';
+  }
+}
+
+class NutritionPage extends StatefulWidget {
+  const NutritionPage({super.key});
+
+  @override
+  State<NutritionPage> createState() => _NutritionPageState();
+}
+
+class _NutritionPageState extends State<NutritionPage> {
+  final ImagePicker _picker = ImagePicker();
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey _logNewMealCardKey = GlobalKey();
+  Uint8List? _selectedImage;
+  late String _selectedMealType;
+  bool _isAnalyzing = false;
+  bool _isReviewOpen = false;
+  bool _isLoadingDaily = true;
+  int? _attemptId;
+  int _handledNutritionLogFocusRequest = 0;
+  int _lockedMealTapCount = 0;
+  String? _lockedMealTapType;
+  DateTime? _lockedMealLastTapAt;
+  final Set<String> _unlockedLoggedMealTypes = {};
+  List<NutritionReviewItem> _reviewItems = [];
+  List<ManualNutritionInput> _pendingManualMeals = [];
+  List<String> _manualMealSuggestions = [];
+  DailyNutritionSummary _dailySummary = DailyNutritionSummary.empty();
+  int _nutritionCalorieGoal = 2000;
+  int? _balancedNutritionCalorieGoal;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedMealType = _recommendedMealType(_dailySummary);
+    UserGoalsService.refreshSignal.addListener(_handleGoalsChanged);
+    _loadNutritionGoal();
+    _loadManualMealSuggestions();
+    _loadDailyNutrition(showErrors: false);
+    if (!kIsWeb) {
+      unawaited(_recoverLostImage());
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final controller = MainNavigationController.maybeOf(context);
+    if (controller == null || controller.currentTab != MainTab.nutrition) {
+      return;
+    }
+
+    final request = controller.nutritionLogFocusRequest;
+    if (request <= _handledNutritionLogFocusRequest) {
+      return;
+    }
+
+    _handledNutritionLogFocusRequest = request;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToLogNewMealCard();
+    });
+  }
+
+  @override
+  void dispose() {
+    UserGoalsService.refreshSignal.removeListener(_handleGoalsChanged);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _handleGoalsChanged() {
+    _loadNutritionGoal();
+  }
+
+  Future<void> _loadNutritionGoal() async {
+    final session = await UserSessionController.instance.load();
+    final userId = session.userId ?? 0;
+    final goals = await UserGoalsService.fetch(userId: userId);
+
+    if (!mounted) return;
+    setState(() {
+      _nutritionCalorieGoal = goals.nutritionCalories;
+      _balancedNutritionCalorieGoal = goals.balancedNutritionCalories;
+    });
+  }
+
+  Future<void> _pickFromCamera() async {
+    try {
+      final XFile? image = await _picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 85,
+        maxWidth: NutritionImageProcessor.maxDimension.toDouble(),
+        maxHeight: NutritionImageProcessor.maxDimension.toDouble(),
+      );
+
+      if (image == null) return;
+      await _preparePickedImage(image, 'Photo captured successfully');
+    } catch (e) {
+      _showSnackBar(_imagePickerError(e, 'Failed to open camera'));
+    }
+  }
+
+  Future<void> _pickFromGallery() async {
+    try {
+      final XFile? image = await _picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 85,
+        maxWidth: NutritionImageProcessor.maxDimension.toDouble(),
+        maxHeight: NutritionImageProcessor.maxDimension.toDouble(),
+      );
+
+      if (image == null) return;
+      await _preparePickedImage(image, 'Image selected from gallery');
+    } catch (e) {
+      _showSnackBar(_imagePickerError(e, 'Failed to open gallery'));
+    }
+  }
+
+  Future<void> _recoverLostImage() async {
+    try {
+      final response = await _picker.retrieveLostData();
+      final files = response.files;
+      if (response.exception != null) {
+        throw response.exception!;
+      }
+      if (response.isEmpty || files == null || files.isEmpty) {
+        return;
+      }
+
+      await _preparePickedImage(files.first, 'Recovered your meal photo');
+    } catch (e) {
+      _showSnackBar(_imagePickerError(e, 'Unable to recover the meal photo'));
+    }
+  }
+
+  Future<void> _preparePickedImage(XFile image, String successMessage) async {
+    final sourceBytes = await image.readAsBytes();
+    final preparedBytes = await compute(
+      NutritionImageProcessor.prepare,
+      sourceBytes,
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _selectedImage = preparedBytes;
+      _attemptId = null;
+      _reviewItems = [];
+      _pendingManualMeals = [];
+    });
+    _showSnackBar(successMessage);
+  }
+
+  String _imagePickerError(Object error, String fallback) {
+    final message = error.toString().trim();
+    if (message.contains('Choose a ') || message.contains('photo is still')) {
+      return message;
+    }
+    return '$fallback. Check photo permissions and try again.';
+  }
+
+  void _showSnackBar(String message) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) {
+      debugPrint('NutritionPage: skipped snackbar without ScaffoldMessenger.');
+      return;
+    }
+
+    messenger.showSnackBar(SnackBar(content: LocalizedText(message)));
+  }
+
+  Future<void> _loadManualMealSuggestions() async {
+    final suggestions = await NutritionMealSuggestionStore.loadMealNames();
+    if (!mounted) return;
+    setState(() {
+      _manualMealSuggestions = suggestions;
+    });
+  }
+
+  Future<void> _onAddMeal({String? initialMealType}) async {
+    if (_isAnalyzing || _isReviewOpen) return;
+    final mealSuggestions = await NutritionMealSuggestionStore.loadMealNames();
+    if (!mounted) return;
+    setState(() {
+      _manualMealSuggestions = mealSuggestions;
+    });
+
+    final result = await showDialog<_ManualLogResult>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => _ManualLogDialog(
+        initialMealType: initialMealType ?? _selectedMealType,
+        loggedMealTypes: _dailySummary.logged,
+        mealSuggestions: _manualMealSuggestions,
+      ),
+    );
+
+    if (!mounted || result == null || result.meals.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      if (result.allowLoggedMealUpdate) {
+        _unlockedLoggedMealTypes.add(result.mealType);
+      }
+      _selectedMealType = result.mealType;
+      _attemptId = null;
+      _reviewItems = [];
+      _pendingManualMeals = [];
+    });
+
+    await _analyzeManualMeals(result.meals);
+  }
+
+  Future<void> _scrollToLogNewMealCard() async {
+    final targetContext = _logNewMealCardKey.currentContext;
+    if (!mounted || targetContext == null) {
+      return;
+    }
+
+    await Scrollable.ensureVisible(
+      targetContext,
+      duration: const Duration(milliseconds: 420),
+      curve: Curves.easeInOutCubic,
+      alignment: 0.06,
+    );
+  }
+
+  Future<void> _loadDailyNutrition({
+    bool showErrors = true,
+    bool resetMealUnlocks = false,
+  }) async {
+    try {
+      final summary = await NutritionApi.fetchDaily();
+      if (!mounted) return;
+      setState(() {
+        if (resetMealUnlocks) {
+          _unlockedLoggedMealTypes.clear();
+          _lockedMealTapCount = 0;
+          _lockedMealTapType = null;
+          _lockedMealLastTapAt = null;
+        }
+        _dailySummary = summary;
+        _syncSelectedMealTypeWithSummary(summary);
+        _isLoadingDaily = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingDaily = false;
+      });
+      if (showErrors) {
+        _showSnackBar(_friendlyError(e));
+      }
+    }
+  }
+
+  Future<void> _analyzeSelectedMeal() async {
+    if (_isAnalyzing || _isReviewOpen) return;
+    if (_selectedImage == null) {
+      _showSnackBar('Please choose or take a food photo first.');
+      return;
+    }
+
+    if (_isSelectedMealTypeLocked()) {
+      _showLockedMealTypeMessage(_selectedMealType);
+      return;
+    }
+
+    setState(() {
+      _isAnalyzing = true;
+      _reviewItems = [];
+      _attemptId = null;
+      _pendingManualMeals = [];
+    });
+
+    try {
+      final result = await NutritionApi.analyzeMeal(
+        imageBytes: _selectedImage!,
+        mealType: _selectedMealType,
+        logDate: NutritionApi.todayKey(),
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _attemptId = result.attemptId;
+        _reviewItems = result.items;
+      });
+    } catch (e) {
+      _showSnackBar(_friendlyError(e));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isAnalyzing = false;
+        });
+      }
+    }
+    if (mounted && _attemptId != null) {
+      await _showReviewDialog();
+    }
+  }
+
+  Future<void> _analyzeManualMeals(List<ManualNutritionInput> meals) async {
+    if (_isAnalyzing || _isReviewOpen) return;
+    if (_isSelectedMealTypeLocked()) {
+      _showLockedMealTypeMessage(_selectedMealType);
+      return;
+    }
+
+    setState(() {
+      _isAnalyzing = true;
+      _reviewItems = [];
+      _attemptId = null;
+      _pendingManualMeals = meals;
+    });
+
+    try {
+      final result = await NutritionApi.analyzeManualMeal(
+        meals: meals,
+        mealType: _selectedMealType,
+        logDate: NutritionApi.todayKey(),
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _selectedImage = null;
+        _attemptId = result.attemptId;
+        _reviewItems = result.items;
+      });
+    } catch (e) {
+      _showSnackBar(_friendlyError(e));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isAnalyzing = false;
+        });
+      }
+    }
+    if (mounted && _attemptId != null) {
+      await _showReviewDialog();
+    }
+  }
+
+  Future<void> _showReviewDialog() async {
+    if (_isReviewOpen) return;
+    setState(() => _isReviewOpen = true);
+    final action = await showNutritionReviewDialog(
+      context: context,
+      items: _reviewItems,
+      mealLabel: _mealTypeLabel(_selectedMealType),
+      onConfirm: _confirmMeal,
+    );
+    if (!mounted) return;
+
+    // Keep the original source so retry also works for manually entered meals.
+    final manualMeals = List<ManualNutritionInput>.of(_pendingManualMeals);
+    if (action != NutritionReviewAction.saved) {
+      _cancelReview();
+    }
+    setState(() => _isReviewOpen = false);
+    if (action == NutritionReviewAction.retry) {
+      if (manualMeals.isNotEmpty) {
+        await _analyzeManualMeals(manualMeals);
+      } else {
+        await _analyzeSelectedMeal();
+      }
+    } else if (action == NutritionReviewAction.saved) {
+      _showSnackBar('Meal saved successfully.');
+    }
+  }
+
+  Future<String?> _confirmMeal() async {
+    final attemptId = _attemptId;
+    if (attemptId == null || _reviewItems.isEmpty) {
+      return 'Analyze a meal before confirming.';
+    }
+
+    try {
+      await NutritionApi.confirmMeal(
+        attemptId: attemptId,
+        mealType: _selectedMealType,
+        logDate: NutritionApi.todayKey(),
+        items: _reviewItems,
+      );
+      final updatedSuggestions = _pendingManualMeals.isEmpty
+          ? null
+          : await NutritionMealSuggestionStore.saveManualMeals(
+              _pendingManualMeals,
+            );
+
+      if (!mounted) return null;
+      setState(() {
+        _selectedImage = null;
+        _attemptId = null;
+        _reviewItems = [];
+        _pendingManualMeals = [];
+        if (updatedSuggestions != null) {
+          _manualMealSuggestions = updatedSuggestions;
+        }
+      });
+      await _loadDailyNutrition(showErrors: false, resetMealUnlocks: true);
+      unawaited(
+        NutritionReminderEngine.instance.evaluate(allowNotification: false),
+      );
+      return null;
+    } catch (e) {
+      return _friendlyError(e);
+    }
+  }
+
+  void _cancelReview() {
+    final attemptId = _attemptId;
+    setState(() {
+      _attemptId = null;
+      _reviewItems = [];
+      _pendingManualMeals = [];
+    });
+    if (attemptId != null) {
+      // A draft can be discarded in the background without delaying a retry.
+      unawaited(
+        NutritionApi.discardAttempt(attemptId).catchError((Object _) {}),
+      );
+    }
+  }
+
+  String _friendlyError(Object error) {
+    final message = error.toString().replaceFirst('Exception: ', '').trim();
+    if (error is TimeoutException ||
+        message.toLowerCase().contains('timeoutexception')) {
+      return 'VitalySync is taking longer than usual. Please try again in a moment.';
+    }
+    if (message.isEmpty) {
+      return 'Something went wrong. Please try again.';
+    }
+    return message;
+  }
+
+  void _syncSelectedMealTypeWithSummary(DailyNutritionSummary summary) {
+    if (_selectedMealType == 'snack') {
+      return;
+    }
+
+    if (!_isLoggedStandardMeal(summary.logged, _selectedMealType) ||
+        _unlockedLoggedMealTypes.contains(_selectedMealType)) {
+      return;
+    }
+
+    _selectedMealType = _recommendedMealType(summary);
+  }
+
+  bool _canSelectMealType(String mealType) {
+    return !_isLoggedStandardMeal(_dailySummary.logged, mealType) ||
+        _unlockedLoggedMealTypes.contains(mealType);
+  }
+
+  bool _isSelectedMealTypeLocked() {
+    return !_canSelectMealType(_selectedMealType);
+  }
+
+  void _selectMealType(String mealType) {
+    setState(() {
+      _selectedMealType = mealType;
+      _attemptId = null;
+      _reviewItems = [];
+      _pendingManualMeals = [];
+    });
+  }
+
+  void _handleLockedMealTypeTap(String mealType) {
+    final now = DateTime.now();
+    final isSameMeal = _lockedMealTapType == mealType;
+    final isQuickTap =
+        _lockedMealLastTapAt != null &&
+        now.difference(_lockedMealLastTapAt!) <=
+            const Duration(milliseconds: 900);
+
+    _lockedMealTapType = mealType;
+    _lockedMealLastTapAt = now;
+    _lockedMealTapCount = isSameMeal && isQuickTap
+        ? _lockedMealTapCount + 1
+        : 1;
+
+    if (_lockedMealTapCount >= 3) {
+      setState(() {
+        _unlockedLoggedMealTypes.add(mealType);
+        _selectedMealType = mealType;
+        _attemptId = null;
+        _reviewItems = [];
+        _pendingManualMeals = [];
+      });
+      _lockedMealTapCount = 0;
+      _lockedMealTapType = null;
+      _lockedMealLastTapAt = null;
+      _showSnackBar('${_mealTypeLabel(mealType)} unlocked for editing.');
+      return;
+    }
+
+    if (_lockedMealTapCount == 1) {
+      _showLockedMealTypeMessage(mealType);
+    }
+  }
+
+  void _showLockedMealTypeMessage(String mealType) {
+    _showSnackBar(
+      '${_mealTypeLabel(mealType)} is already logged. Triple-tap it to edit.',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isCompact = screenWidth < 380;
+    final pagePadding = isCompact ? 10.0 : 12.0;
+    final sectionSpacing = isCompact ? 10.0 : 12.0;
+
+    return Container(
+      decoration: buildPageDecoration(context),
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: SafeArea(
+          child: SingleChildScrollView(
+            controller: _scrollController,
+            padding: EdgeInsets.fromLTRB(
+              pagePadding,
+              pagePadding,
+              pagePadding,
+              mainPageBottomContentPadding(context),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const RevealOnBuild(child: NutritionHeaderCard()),
+                SizedBox(height: sectionSpacing),
+                RevealOnBuild(
+                  delay: const Duration(milliseconds: 70),
+                  child: AppSkeleton(
+                    enabled: _isLoadingDaily,
+                    child: TodayNutritionCard(
+                      calories: _dailySummary.totalCalories,
+                      proteinG: _dailySummary.totalProteinG,
+                      carbsG: _dailySummary.totalCarbsG,
+                      fatG: _dailySummary.totalFatG,
+                      calorieGoal: _nutritionCalorieGoal,
+                      balancedCalorieGoal: _balancedNutritionCalorieGoal,
+                    ),
+                  ),
+                ),
+                SizedBox(height: sectionSpacing),
+                RevealOnBuild(
+                  delay: const Duration(milliseconds: 140),
+                  child: Container(
+                    key: _logNewMealCardKey,
+                    child: IgnorePointer(
+                      ignoring: _isAnalyzing || _isReviewOpen,
+                      child: LogNewMealCard(
+                        selectedImage: _selectedImage,
+                        selectedMealType: _selectedMealType,
+                        isAnalyzing: _isAnalyzing,
+                        onTakePhoto: _pickFromCamera,
+                        onChooseFromGallery: _pickFromGallery,
+                        onAnalyze: _analyzeSelectedMeal,
+                        onMealTypeChanged: _selectMealType,
+                        canSelectMealType: _canSelectMealType,
+                        onLockedMealTypeTap: _handleLockedMealTypeTap,
+                      ),
+                    ),
+                  ),
+                ),
+                SizedBox(height: sectionSpacing),
+                RevealOnBuild(
+                  delay: const Duration(milliseconds: 210),
+                  child: _isLoadingDaily
+                      ? const TodaysMealsSkeleton()
+                      : TodaysMealsCard(
+                          onAddTap: _onAddMeal,
+                          onMealTypeAddTap: (mealType) =>
+                              _onAddMeal(initialMealType: mealType),
+                          meals: _dailySummary.meals,
+                          verticalScrollController: _scrollController,
+                        ),
+                ),
+                SizedBox(height: sectionSpacing),
+                RevealOnBuild(
+                  delay: const Duration(milliseconds: 280),
+                  child: AppSkeleton(
+                    enabled: _isLoadingDaily,
+                    child: MacroBalanceCard(
+                      proteinG: _dailySummary.totalProteinG,
+                      carbsG: _dailySummary.totalCarbsG,
+                      fatG: _dailySummary.totalFatG,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

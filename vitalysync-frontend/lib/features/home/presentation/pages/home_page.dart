@@ -1,0 +1,538 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../../data/device_location_service.dart';
+import '../../data/environment_api.dart';
+import '../../data/environment_model.dart';
+import '../../../../features/activity/data/activity_service.dart';
+import '../../../../features/dashboard/data/burnout_score_api.dart';
+import '../../../../features/activity/presentation/widgets/activity_summary_card.dart';
+import '../../../../features/log/data/log_api.dart';
+import '../../../../features/dashboard/data/burnout_display_data.dart';
+import '../../../../shared/notifications/notification_feed_service.dart';
+import '../../../../shared/theme/app_page_style.dart';
+import '../../../../shared/widgets/app_bar.dart';
+import '../../../../shared/widgets/reveal_on_build.dart';
+import '../widgets/burnout_card.dart';
+import '../widgets/environmental_card.dart';
+import '../widgets/home_header.dart';
+import '../widgets/info_card.dart';
+import '../widgets/quick_actions.dart';
+import '../widgets/weekly_analytics.dart';
+import 'package:vitalysync/l10n/localized_text.dart';
+
+enum _HomeLiveDataIssue { offline, unavailable }
+
+BoxDecoration _buildHomePageDecoration(BuildContext context) {
+  final isDark = Theme.of(context).brightness == Brightness.dark;
+
+  return BoxDecoration(
+    gradient: LinearGradient(
+      colors: isDark
+          ? const [Color(0xFF08131D), Color(0xFF0B2230), Color(0xFF17253A)]
+          : const [
+              Color(0xFFEAF9F2),
+              Color(0xFFEEF8FF),
+              Color(0xFFF8F3FF),
+              Color(0xFFFFFFFF),
+            ],
+      stops: isDark ? const [0, 0.5, 1] : const [0, 0.38, 0.72, 1],
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+    ),
+  );
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key, required this.onProfileTap});
+
+  final VoidCallback onProfileTap;
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+  static const double _fallbackLatitude = 9.65;
+  static const double _fallbackLongitude = 123.85;
+
+  String _sleepValue = '--';
+  String _sleepSubtitle = 'No log yet';
+  String? _sleepQualityLabel;
+  Color _sleepQualityColor = Colors.blue;
+  String _hydrationValue = '--';
+  String _hydrationSubtitle = 'No log yet';
+  String? _hydrationLevel;
+  Color _hydrationLevelColor = Colors.green;
+  BurnoutDisplayData? _burnoutData;
+  bool _isLoadingBurnout = true;
+  bool _isLoadingSummary = true;
+  bool _isLoadingEnvironment = true;
+  _HomeLiveDataIssue? _summaryIssue;
+  bool _isUsingCachedEnvironment = false;
+  bool _hasEnvironmentError = false;
+  EnvironmentSnapshot? _environmentSnapshot;
+  int _refreshVersion = 0;
+  int _burnoutLoadToken = 0;
+  int _summaryLoadToken = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    BurnoutScoreApi.refreshSignal.addListener(_handleBurnoutInputsChanged);
+    ActivityService.instance.startTracking();
+    _loadBurnoutBaseline();
+    _loadLatestSummary();
+    _loadEnvironment();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    BurnoutScoreApi.refreshSignal.removeListener(_handleBurnoutInputsChanged);
+    super.dispose();
+  }
+
+  void _handleBurnoutInputsChanged() {
+    setState(() => _refreshVersion++);
+    unawaited(_loadBurnoutBaseline());
+    unawaited(_loadLatestSummary(showLoader: false));
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ActivityService.instance.startTracking();
+      _loadBurnoutBaseline();
+      _loadLatestSummary(showLoader: false);
+      _loadEnvironment(showLoader: false);
+    }
+  }
+
+  Future<void> _refreshHome() async {
+    setState(() {
+      _refreshVersion++;
+    });
+
+    await Future.wait([
+      ActivityService.instance.refresh(),
+      _loadBurnoutBaseline(forceRefresh: true),
+      _loadLatestSummary(showLoader: false),
+      _loadEnvironment(showLoader: false, forceRefresh: true),
+      refreshAppBarStreak(),
+      refreshNotificationFeed(),
+    ]);
+  }
+
+  Future<void> _loadBurnoutBaseline({bool forceRefresh = false}) async {
+    final loadToken = ++_burnoutLoadToken;
+    setState(() => _isLoadingBurnout = _burnoutData == null);
+    final data = await BurnoutDisplayData.load(forceRefresh: forceRefresh);
+    if (!mounted || loadToken != _burnoutLoadToken) return;
+    setState(() {
+      _burnoutData = data;
+      _isLoadingBurnout = false;
+    });
+  }
+
+  Future<void> _loadLatestSummary({bool showLoader = true}) async {
+    if (!mounted) return;
+    final loadToken = ++_summaryLoadToken;
+
+    setState(() {
+      if (showLoader) {
+        _isLoadingSummary = true;
+      }
+      _summaryIssue = null;
+    });
+
+    try {
+      final data = await LogApi.fetchLatestLog();
+      final hasLog = data['has_log'] == true;
+      final log = data['log'] as Map<String, dynamic>?;
+      final summaryIssue = _summaryIssueFrom(data);
+
+      if (!mounted || loadToken != _summaryLoadToken) return;
+
+      if (!hasLog || log == null) {
+        setState(() {
+          _sleepValue = '--';
+          _hydrationValue = '--';
+          _sleepSubtitle = 'No log yet';
+          _hydrationSubtitle = 'No log yet';
+          _sleepQualityLabel = null;
+          _sleepQualityColor = Colors.blue;
+          _hydrationLevel = null;
+          _hydrationLevelColor = Colors.green;
+          _isLoadingSummary = false;
+          _summaryIssue = summaryIssue;
+        });
+        return;
+      }
+
+      final dateLabel = LogApi.parseInt(data['pending_sync_count']) > 0
+          ? '${LogApi.formatLogDateLabel(log['log_date'])} · saved offline'
+          : LogApi.formatLogDateLabel(log['log_date']);
+      final hydrationStatus = LogApi.getHydrationStatus(
+        log['hydration_liters'],
+      );
+      final sleepQuality = LogApi.parseInt(log['sleep_quality'], fallback: -1);
+
+      setState(() {
+        _sleepValue = LogApi.formatSleepHours(log['sleep_hours']);
+        _sleepSubtitle = dateLabel;
+        _sleepQualityLabel = _sleepQualityLabelFor(sleepQuality);
+        _sleepQualityColor = _sleepQualityColorFor(sleepQuality);
+        _hydrationValue = LogApi.formatHydrationLiters(log['hydration_liters']);
+        _hydrationSubtitle = dateLabel;
+        _hydrationLevel = hydrationStatus.shortLabel;
+        _hydrationLevelColor = Color(hydrationStatus.colorValue);
+        _isLoadingSummary = false;
+        _summaryIssue = summaryIssue;
+      });
+    } catch (_) {
+      if (!mounted || loadToken != _summaryLoadToken) return;
+
+      setState(() {
+        _sleepSubtitle = 'Summary unavailable';
+        _hydrationSubtitle = _sleepSubtitle;
+        _sleepQualityLabel = null;
+        _sleepQualityColor = Colors.blue;
+        _hydrationLevel = null;
+        _hydrationLevelColor = Colors.green;
+        _isLoadingSummary = false;
+        _summaryIssue = _HomeLiveDataIssue.unavailable;
+      });
+    }
+  }
+
+  Future<void> _loadEnvironment({
+    bool showLoader = true,
+    bool forceRefresh = false,
+  }) async {
+    if (!mounted) return;
+
+    setState(() {
+      if (showLoader) {
+        _isLoadingEnvironment = true;
+      }
+      _hasEnvironmentError = false;
+    });
+
+    try {
+      final coordinates = await DeviceLocationService.getCurrentCoordinates();
+      final snapshot = await EnvironmentApi.fetchEnvironment(
+        lat: coordinates?.latitude ?? _fallbackLatitude,
+        lon: coordinates?.longitude ?? _fallbackLongitude,
+        forceRefresh: forceRefresh,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _environmentSnapshot = snapshot;
+        _isUsingCachedEnvironment = false;
+        _hasEnvironmentError = false;
+        _isLoadingEnvironment = false;
+      });
+    } catch (error) {
+      debugPrint('Environment load failed: $error');
+      final cachedSnapshot = await EnvironmentApi.loadCachedSnapshot();
+      if (!mounted) return;
+
+      setState(() {
+        _environmentSnapshot = cachedSnapshot;
+        _isUsingCachedEnvironment = cachedSnapshot != null;
+        _hasEnvironmentError = cachedSnapshot == null;
+        _isLoadingEnvironment = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: _buildHomePageDecoration(context),
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: SafeArea(
+          child: RefreshIndicator(
+            onRefresh: _refreshHome,
+            child: SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: EdgeInsets.fromLTRB(
+                12,
+                6,
+                12,
+                mainPageBottomContentPadding(context),
+              ),
+              child: Column(
+                children: [
+                  RevealOnBuild(
+                    delay: const Duration(milliseconds: 40),
+                    child: HomeHeader(onProfileTap: widget.onProfileTap),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_summaryIssue != null) ...[
+                    RevealOnBuild(
+                      child: _buildStatusBanner(context, _summaryIssue!),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  RevealOnBuild(
+                    delay: const Duration(milliseconds: 100),
+                    child: BurnoutCard(
+                      score: _burnoutData?.score,
+                      status: _burnoutData?.status ?? 'No estimate yet',
+                      sourceLabel: _burnoutData?.sourceLabel,
+                      riskLevel: _burnoutData?.riskLevel,
+                      isLoading: _isLoadingBurnout,
+                      latestScore: _burnoutData?.latestScore,
+                      patternSummary: _burnoutData?.patternSummary,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  RevealOnBuild(
+                    delay: const Duration(milliseconds: 160),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: InfoCard(
+                            icon: Icons.bedtime,
+                            title: 'Sleep',
+                            value: _sleepValue,
+                            subtitle: _sleepSubtitle,
+                            color: Colors.blue,
+                            isLoading: _isLoadingSummary,
+                            statusHint: _sleepQualityLabel,
+                            statusColor: _sleepQualityColor,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: InfoCard(
+                            icon: Icons.opacity,
+                            title: 'Hydration',
+                            value: _hydrationValue,
+                            subtitle: _hydrationSubtitle,
+                            color: Colors.green,
+                            isLoading: _isLoadingSummary,
+                            statusHint: _hydrationLevel,
+                            statusColor: _hydrationLevelColor,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const RevealOnBuild(
+                    delay: Duration(milliseconds: 220),
+                    child: QuickActionsSection(),
+                  ),
+                  const SizedBox(height: 12),
+                  RevealOnBuild(
+                    delay: const Duration(milliseconds: 280),
+                    child: EnvironmentalCard(
+                      snapshot: _environmentSnapshot,
+                      isLoading: _isLoadingEnvironment,
+                      isCached: _isUsingCachedEnvironment,
+                      hasError: _hasEnvironmentError,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  RevealOnBuild(
+                    delay: const Duration(milliseconds: 340),
+                    child: ValueListenableBuilder<ActivityTrackingState>(
+                      valueListenable: ActivityService.instance.notifier,
+                      builder: (context, activityState, _) {
+                        if (!activityState.isStepTrackingSupported) {
+                          return const SizedBox.shrink();
+                        }
+
+                        return ActivitySummaryCard(
+                          state: activityState,
+                          compact: true,
+                          onRefresh: () => ActivityService.instance.refresh(),
+                          onEditGoal: ActivityService.instance.updateGoalSteps,
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  RevealOnBuild(
+                    delay: const Duration(milliseconds: 400),
+                    child: HomeWeeklyAnalyticsCard(
+                      refreshVersion: _refreshVersion,
+                    ),
+                  ),
+                  ValueListenableBuilder<ActivityTrackingState>(
+                    valueListenable: ActivityService.instance.notifier,
+                    builder: (context, activityState, _) {
+                      if (activityState.isStepTrackingSupported) {
+                        return const SizedBox.shrink();
+                      }
+
+                      return Column(
+                        children: [
+                          const SizedBox(height: 12),
+                          RevealOnBuild(
+                            delay: const Duration(milliseconds: 460),
+                            child: _buildDailyStepsUnsupportedNote(context),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String? _sleepQualityLabelFor(int value) {
+    switch (value) {
+      case 0:
+        return 'Poor quality';
+      case 1:
+        return 'Fair quality';
+      case 2:
+        return 'Good quality';
+      case 3:
+        return 'Very good';
+      case 4:
+        return 'Excellent';
+      default:
+        return null;
+    }
+  }
+
+  Color _sleepQualityColorFor(int value) {
+    switch (value) {
+      case 0:
+        return const Color(0xFFDC2626);
+      case 1:
+        return const Color(0xFFF97316);
+      case 2:
+        return const Color(0xFF2563EB);
+      case 3:
+        return const Color(0xFF7C3AED);
+      case 4:
+        return const Color(0xFF16A34A);
+      default:
+        return Colors.blue;
+    }
+  }
+
+  _HomeLiveDataIssue? _summaryIssueFrom(Map<String, dynamic> data) {
+    if (data['is_offline'] != true) {
+      return null;
+    }
+
+    return data['live_data_issue'] == LogApi.liveDataIssueOffline
+        ? _HomeLiveDataIssue.offline
+        : _HomeLiveDataIssue.unavailable;
+  }
+
+  Widget _buildStatusBanner(BuildContext context, _HomeLiveDataIssue issue) {
+    final isOffline = issue == _HomeLiveDataIssue.offline;
+    final accentColor = isOffline
+        ? const Color(0xFF0F766E)
+        : const Color(0xFF2563EB);
+    final message = isOffline
+        ? 'You appear to be offline.'
+        : 'Live data is currently unavailable.';
+
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 320),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: Theme.of(context).brightness == Brightness.dark
+                ? const Color(0xFF102235).withValues(alpha: 0.82)
+                : Colors.white.withValues(alpha: 0.78),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: accentColor.withValues(alpha: 0.2)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Icon(
+                isOffline ? Icons.wifi_off_rounded : Icons.cloud_off_outlined,
+                size: 18,
+                color: accentColor,
+              ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: LocalizedText(
+                  message,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    height: 1.2,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: pagePrimaryTextColor(context),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDailyStepsUnsupportedNote(BuildContext context) {
+    final accentColor = const Color(0xFF1EAD83);
+
+    return Center(
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: pageSurfaceColor(context),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: pageBorderColor(context)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(
+                alpha: Theme.of(context).brightness == Brightness.dark
+                    ? 0.20
+                    : 0.05,
+              ),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.directions_walk_rounded, size: 19, color: accentColor),
+            const SizedBox(width: 8),
+            Flexible(
+              child: LocalizedText(
+                'Daily steps is not supported on this device.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: pagePrimaryTextColor(context),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  height: 1.3,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

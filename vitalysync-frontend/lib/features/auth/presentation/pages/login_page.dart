@@ -1,0 +1,340 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:google_fonts/google_fonts.dart';
+
+import '../../../../features/settings/data/account_lifecycle_api.dart';
+import '../../../../shared/config/api_config.dart';
+import '../../../../shared/offline/fetch_policy.dart';
+import '../../../../shared/preferences/user_session.dart';
+import '../../../../shared/theme/app_page_style.dart';
+import '../../../../shared/widgets/validation_dialog.dart';
+import '../authenticated_session_coordinator.dart';
+import '../widgets/auth_chrome.dart';
+import 'forgot_password_page.dart';
+import 'reactivate_account_page.dart';
+import 'sign_up_page.dart';
+import 'package:vitalysync/l10n/localized_text.dart';
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key, this.showSessionExpiredNotice = false});
+
+  final bool showSessionExpiredNotice;
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final TextEditingController emailController = TextEditingController();
+  final TextEditingController passwordController = TextEditingController();
+  final FocusNode _emailFocusNode = FocusNode();
+  final FocusNode _passwordFocusNode = FocusNode();
+
+  bool isLoading = false;
+  bool _obscurePassword = true;
+  final String loginUrl = ApiConfig.auth('/login');
+
+  @override
+  void initState() {
+    super.initState();
+    _prefillCachedEmail();
+  }
+
+  Future<void> _prefillCachedEmail() async {
+    final cachedEmail = await UserSessionController.instance
+        .loadLastLoginEmail();
+    if (!mounted || cachedEmail == null || emailController.text.isNotEmpty) {
+      return;
+    }
+
+    emailController.text = cachedEmail;
+    emailController.selection = TextSelection.collapsed(
+      offset: cachedEmail.length,
+    );
+  }
+
+  Widget _buildSessionExpiredNotice(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final accent = Theme.of(context).colorScheme.primary;
+
+    return Container(
+      key: const ValueKey('login-session-expired-notice'),
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: isDark ? 0.14 : 0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: accent.withValues(alpha: 0.22)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.lock_clock_outlined, color: accent, size: 21),
+          const SizedBox(width: 10),
+          Expanded(
+            child: LocalizedText(
+              'Your session ended for your security. Your email is ready—enter your password to continue.',
+              style: GoogleFonts.poppins(
+                color: pageSecondaryTextColor(context),
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _loginFailureMessage(http.Response response) {
+    const fallback = 'Login failed';
+
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        final serverMessage = decoded['message'] ?? decoded['error'];
+        final normalizedMessage = serverMessage?.toString().trim();
+
+        if (normalizedMessage != null && normalizedMessage.isNotEmpty) {
+          return normalizedMessage;
+        }
+      }
+    } catch (_) {
+      // Keep the user-facing fallback when the server does not return JSON.
+    }
+
+    return fallback;
+  }
+
+  Future<void> login() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+
+    if (isLoading) {
+      return;
+    }
+
+    setState(() => isLoading = true);
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse(loginUrl),
+            headers: await ApiConfig.jsonHeaders(),
+            body: jsonEncode({
+              'email': emailController.text.trim(),
+              'password': passwordController.text.trim(),
+            }),
+          )
+          .timeout(ApiRequestTimeouts.standard);
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        if (!mounted) return;
+        try {
+          await completeAuthenticatedSession(context, data);
+        } on FormatException {
+          if (!mounted) return;
+          await ValidationDialog.show(
+            context,
+            message: 'We could not finish signing you in. Please try again.',
+            type: ValidationDialogType.error,
+          );
+        }
+      } else {
+        Map<String, dynamic> data = const {};
+        try {
+          final decoded = jsonDecode(response.body);
+          if (decoded is Map<String, dynamic>) data = decoded;
+        } catch (_) {
+          // The normal error dialog below supplies a stable fallback.
+        }
+        final challenge = AccountReactivationChallenge.fromLoginResponse(
+          response.statusCode,
+          data,
+        );
+        if (challenge != null) {
+          passwordController.clear();
+          if (!mounted) return;
+          await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ReactivateAccountPage(challenge: challenge),
+            ),
+          );
+          return;
+        }
+        if (!mounted) return;
+        await ValidationDialog.show(
+          context,
+          message: _loginFailureMessage(response),
+          type: ValidationDialogType.error,
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      await ValidationDialog.show(
+        context,
+        message:
+            'VitalySync could not connect right now. Please check your connection and try again.',
+        type: ValidationDialogType.connection,
+      );
+    } finally {
+      if (mounted && isLoading) {
+        setState(() => isLoading = false);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    emailController.dispose();
+    passwordController.dispose();
+    _emailFocusNode.dispose();
+    _passwordFocusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const logoBlue = Color(0xFF0584FF);
+    final theme = Theme.of(context);
+
+    return Theme(
+      data: theme.copyWith(
+        colorScheme: theme.colorScheme.copyWith(
+          primary: logoBlue,
+          onPrimary: Colors.white,
+        ),
+        textSelectionTheme: theme.textSelectionTheme.copyWith(
+          cursorColor: logoBlue,
+          selectionColor: logoBlue.withValues(alpha: 0.24),
+          selectionHandleColor: logoBlue,
+        ),
+      ),
+      child: Builder(builder: _buildLoginContent),
+    );
+  }
+
+  Widget _buildLoginContent(BuildContext context) {
+    return AuthScaffold(
+      illustrationAsset: authWorkStressAsset,
+      topOverlayAsset: authMeditationAsset,
+      backdropStyle: AuthBackdropStyle.login,
+      child: AuthGlassPanel(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const AuthBrandHeader(
+              title: 'Welcome back',
+              subtitle:
+                  'Continue your check-ins and keep your wellness rhythm visible.',
+              logoSize: 68,
+            ),
+            const SizedBox(height: 24),
+            if (widget.showSessionExpiredNotice) ...[
+              _buildSessionExpiredNotice(context),
+              const SizedBox(height: 16),
+            ],
+            AuthTextField(
+              key: const ValueKey('login-email-field'),
+              controller: emailController,
+              focusNode: _emailFocusNode,
+              label: 'Email',
+              hintText: 'you@gmail.com'.localizedCopy(context),
+              icon: Icons.email_outlined,
+              keyboardType: TextInputType.emailAddress,
+              textInputAction: TextInputAction.next,
+              onFieldSubmitted: (_) => _passwordFocusNode.requestFocus(),
+            ),
+            const SizedBox(height: 14),
+            AuthTextField(
+              key: const ValueKey('login-password-field'),
+              controller: passwordController,
+              focusNode: _passwordFocusNode,
+              label: 'Password',
+              icon: Icons.lock_outline,
+              obscureText: _obscurePassword,
+              suffixIcon: IconButton(
+                tooltip: _obscurePassword ? 'Show password' : 'Hide password',
+                icon: Icon(
+                  _obscurePassword
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
+                ),
+                onPressed: () {
+                  setState(() => _obscurePassword = !_obscurePassword);
+                },
+              ),
+              textInputAction: TextInputAction.done,
+              onFieldSubmitted: (_) => login(),
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                key: const ValueKey('login-forgot-password-button'),
+                onPressed: isLoading
+                    ? null
+                    : () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ForgotPasswordPage(
+                              initialEmail: emailController.text.trim(),
+                            ),
+                          ),
+                        );
+                      },
+                child: LocalizedText(
+                  'Forgot password?',
+                  style: GoogleFonts.poppins(
+                    fontWeight: FontWeight.w700,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            AuthButton.primary(
+              label: 'Sign in',
+              icon: Icons.login_rounded,
+              onPressed: login,
+              isLoading: isLoading,
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              alignment: WrapAlignment.center,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                LocalizedText(
+                  'New to VitalySync? ',
+                  style: GoogleFonts.poppins(
+                    color: pageSecondaryTextColor(context),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const SignUpPage()),
+                    );
+                  },
+                  child: LocalizedText(
+                    'Create account',
+                    style: GoogleFonts.poppins(
+                      fontWeight: FontWeight.w800,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

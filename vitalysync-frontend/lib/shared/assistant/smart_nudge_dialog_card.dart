@@ -1,0 +1,1061 @@
+part of 'floating_smart_nudge_assistant.dart';
+
+class _SmartNudgeDialogCard extends StatefulWidget {
+  final NudgeAlternativeController? smartAlternatives;
+  final NudgeAlternativeController? nutritionAlternatives;
+  final String emoji;
+  final String message;
+  final List<AdaptiveNudgeRecommendation> recommendations;
+  final NutritionInsight? nutritionInsight;
+  final FirstWeekLearningState firstWeekLearning;
+  final bool isLoading;
+  final bool isNutritionLoading;
+  final Future<void> Function(
+    AdaptiveNudgeRecommendation recommendation,
+    String status,
+  )
+  onStatusChanged;
+  final Future<void> Function(NutritionInsight insight, String status)
+  onNutritionStatusChanged;
+
+  const _SmartNudgeDialogCard({
+    this.smartAlternatives,
+    this.nutritionAlternatives,
+    required this.emoji,
+    required this.message,
+    required this.recommendations,
+    required this.nutritionInsight,
+    required this.firstWeekLearning,
+    required this.isLoading,
+    required this.isNutritionLoading,
+    required this.onStatusChanged,
+    required this.onNutritionStatusChanged,
+  });
+
+  @override
+  State<_SmartNudgeDialogCard> createState() => _SmartNudgeDialogCardState();
+}
+
+class _SmartNudgeDialogCardState extends State<_SmartNudgeDialogCard> {
+  String? _nudgeStatus;
+  bool _isUpdatingNudgeStatus = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadFeedbackStatus());
+  }
+
+  @override
+  void didUpdateWidget(covariant _SmartNudgeDialogCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldPrimary = _primaryRecommendation(oldWidget.recommendations);
+    final newPrimary = _primaryRecommendation(widget.recommendations);
+
+    if (oldPrimary?.metadata['content_id'] !=
+            newPrimary?.metadata['content_id'] ||
+        oldPrimary?.nudgeEventId != newPrimary?.nudgeEventId ||
+        oldPrimary?.nudgeType != newPrimary?.nudgeType ||
+        oldPrimary?.message != newPrimary?.message) {
+      _nudgeStatus = null;
+      _isUpdatingNudgeStatus = false;
+      unawaited(_loadFeedbackStatus());
+    }
+  }
+
+  Future<void> _loadFeedbackStatus() async {
+    final primary = _primaryRecommendation(widget.recommendations);
+    final nudgeStatus = primary == null
+        ? null
+        : await AdaptiveNudgeApi.readNudgeFeedbackStatus(primary);
+
+    if (!mounted ||
+        primary?.metadata['content_id'] !=
+            _primaryRecommendation(
+              widget.recommendations,
+            )?.metadata['content_id']) {
+      return;
+    }
+
+    if (_isUpdatingNudgeStatus) return;
+    setState(() {
+      _nudgeStatus = nudgeStatus;
+    });
+  }
+
+  Future<void> _updateNudgeStatus(
+    AdaptiveNudgeRecommendation recommendation,
+    String status,
+  ) async {
+    if (_isUpdatingNudgeStatus) return;
+    final previousStatus = _nudgeStatus;
+    setState(() {
+      _nudgeStatus = status;
+      _isUpdatingNudgeStatus = true;
+    });
+
+    try {
+      await widget.onStatusChanged(recommendation, status);
+    } catch (error) {
+      if (mounted &&
+          recommendation.metadata['content_id'] ==
+              _primaryRecommendation(
+                widget.recommendations,
+              )?.metadata['content_id']) {
+        setState(() {
+          _nudgeStatus = previousStatus;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: LocalizedText(
+              'Unable to save feedback: ${error.toString().replaceFirst('Exception: ', '')}',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted &&
+          recommendation.metadata['content_id'] ==
+              _primaryRecommendation(
+                widget.recommendations,
+              )?.metadata['content_id']) {
+        setState(() {
+          _isUpdatingNudgeStatus = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = _primaryRecommendation(widget.recommendations);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        AnimatedSize(
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 220),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
+            child: KeyedSubtree(
+              key: ValueKey(primary?.metadata['content_id'] ?? 'loading'),
+              child: WellnessContentExposure(
+                content: primary?.toJson(),
+                child: _SmartNudgeInsightCard(
+                  alternatives: widget.smartAlternatives,
+                  emoji: widget.emoji,
+                  fallbackMessage: widget.message,
+                  primary: primary,
+                  firstWeekLearning: widget.firstWeekLearning,
+                  isLoading: widget.isLoading,
+                  feedbackStatus: _nudgeStatus,
+                  isUpdatingFeedback: _isUpdatingNudgeStatus,
+                  onLiked: primary == null
+                      ? null
+                      : () => _updateNudgeStatus(primary, 'accepted'),
+                  onDisliked: primary == null
+                      ? null
+                      : () => _updateNudgeStatus(primary, 'dismissed'),
+                  onResponse: primary == null
+                      ? null
+                      : (value) => _updateNudgeStatus(primary, value),
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (widget.nutritionInsight != null ||
+            !widget.isLoading ||
+            widget.isNutritionLoading) ...[
+          const SizedBox(height: 12),
+          _NutritionNudgeDialogCard(
+            alternatives: widget.nutritionAlternatives,
+            insight: widget.nutritionInsight,
+            isLoading: widget.isNutritionLoading,
+            onNutritionStatusChanged: widget.onNutritionStatusChanged,
+          ),
+        ],
+      ],
+    );
+  }
+
+  AdaptiveNudgeRecommendation? _primaryRecommendation(
+    List<AdaptiveNudgeRecommendation> recommendations,
+  ) {
+    if (recommendations.isEmpty) {
+      return null;
+    }
+
+    return recommendations.first;
+  }
+}
+
+class _NutritionNudgeDialogCard extends StatefulWidget {
+  final NudgeAlternativeController? alternatives;
+  final NutritionInsight? insight;
+  final bool isLoading;
+  final Future<void> Function(NutritionInsight insight, String status)
+  onNutritionStatusChanged;
+
+  const _NutritionNudgeDialogCard({
+    this.alternatives,
+    required this.insight,
+    required this.isLoading,
+    required this.onNutritionStatusChanged,
+  });
+
+  @override
+  State<_NutritionNudgeDialogCard> createState() =>
+      _NutritionNudgeDialogCardState();
+}
+
+class _NutritionNudgeDialogCardState extends State<_NutritionNudgeDialogCard> {
+  String? _nutritionStatus;
+  bool _isUpdatingNutritionStatus = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadFeedbackStatus());
+  }
+
+  @override
+  void didUpdateWidget(covariant _NutritionNudgeDialogCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.insight?.id != widget.insight?.id) {
+      _nutritionStatus = null;
+      _isUpdatingNutritionStatus = false;
+      unawaited(_loadFeedbackStatus());
+    }
+  }
+
+  Future<void> _loadFeedbackStatus() async {
+    final insight = widget.insight;
+    final nutritionStatus = insight == null
+        ? null
+        : await NutritionInsightStore.instance.readFeedbackStatus(insight.id);
+    final event = insight == null
+        ? null
+        : await WellnessContentApi.savedEvent(insight.toJson());
+    final helpfulness = event == null
+        ? insight?.metadata['helpfulness']
+        : WellnessContentApi.metadata(event)['helpfulness'];
+
+    if (!mounted || insight?.id != widget.insight?.id) {
+      return;
+    }
+
+    if (_isUpdatingNutritionStatus) return;
+    final details = event == null
+        ? insight?.metadata ?? {}
+        : WellnessContentApi.metadata(event);
+    final snoozed =
+        DateTime.tryParse(
+          '${details['snoozed_until']}',
+        )?.isAfter(DateTime.now()) ==
+        true;
+    setState(() {
+      _nutritionStatus = switch (helpfulness) {
+        'like' => 'accepted',
+        'dislike' => 'dismissed',
+        _ => nutritionStatus,
+      };
+      if (details['completed_at'] != null) {
+        _nutritionStatus = 'done';
+      } else if (snoozed) {
+        _nutritionStatus = 'not_now';
+      }
+    });
+  }
+
+  Future<void> _updateNutritionStatus(
+    NutritionInsight insight,
+    String status,
+  ) async {
+    if (_isUpdatingNutritionStatus) return;
+    final previousStatus = _nutritionStatus;
+    setState(() {
+      _nutritionStatus = status;
+      _isUpdatingNutritionStatus = true;
+    });
+
+    try {
+      await widget.onNutritionStatusChanged(insight, status);
+    } catch (error) {
+      if (mounted && insight.id == widget.insight?.id) {
+        setState(() {
+          _nutritionStatus = previousStatus;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: LocalizedText(
+              'Unable to save nutrition feedback: ${error.toString().replaceFirst('Exception: ', '')}',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted && insight.id == widget.insight?.id) {
+        setState(() {
+          _isUpdatingNutritionStatus = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final insight = widget.insight;
+    if (insight == null) {
+      return _NutritionInsightEmptyCard(isLoading: widget.isLoading);
+    }
+
+    return WellnessContentExposure(
+      content: insight.toJson(),
+      child: _NutritionInsightDialogCard(
+        alternatives: widget.alternatives,
+        insight: insight,
+        feedbackStatus: _nutritionStatus,
+        isUpdatingFeedback: _isUpdatingNutritionStatus,
+        onLiked: () => _updateNutritionStatus(insight, 'accepted'),
+        onDisliked: () => _updateNutritionStatus(insight, 'dismissed'),
+        onResponse: (value) => _updateNutritionStatus(insight, value),
+      ),
+    );
+  }
+}
+
+class _SmartNudgeInsightCard extends StatelessWidget {
+  final NudgeAlternativeController? alternatives;
+  final ValueChanged<String>? onResponse;
+  final String emoji;
+  final String fallbackMessage;
+  final AdaptiveNudgeRecommendation? primary;
+  final FirstWeekLearningState firstWeekLearning;
+  final bool isLoading;
+  final String? feedbackStatus;
+  final bool isUpdatingFeedback;
+  final VoidCallback? onLiked;
+  final VoidCallback? onDisliked;
+
+  const _SmartNudgeInsightCard({
+    this.alternatives,
+    this.onResponse,
+    required this.emoji,
+    required this.fallbackMessage,
+    required this.primary,
+    required this.firstWeekLearning,
+    required this.isLoading,
+    required this.feedbackStatus,
+    required this.isUpdatingFeedback,
+    required this.onLiked,
+    required this.onDisliked,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final recommendation = primary;
+    if (isLoading && recommendation == null) {
+      return const AppSkeletonCard(
+        height: 220,
+        lineCount: 4,
+        padding: EdgeInsets.all(16),
+        radius: 24,
+      );
+    }
+
+    final nudgeTitle = recommendation?.title.trim() ?? '';
+    final body = _expandedAssistantText(
+      recommendation?.message ??
+          (isLoading
+              ? fallbackMessage
+              : 'No other suggestion fits right now. Check back after your next log.'),
+    );
+    final severity = recommendation?.userFacingSeverity ?? 'steady';
+    final severityColor = _severityColor(severity, isDark);
+    final metadata = recommendation?.metadata ?? const <String, dynamic>{};
+    final dominantDimension = metadata['dominant_dimension'];
+    final dimensionLabel = dominantDimension is Map
+        ? _metadataText(dominantDimension['label']).trim()
+        : '';
+    final patternLabel = _metadataText(metadata['pattern_title']).trim();
+    final triggerLabel = recommendation?.triggerReason.trim() ?? '';
+    final mainFactor = dimensionLabel.isNotEmpty
+        ? dimensionLabel
+        : patternLabel.isNotEmpty
+        ? patternLabel
+        : triggerLabel == 'Local fallback'
+        ? ''
+        : triggerLabel;
+    final actionSteps = _metadataTextList(metadata['ai_action_steps']);
+    final actionLabel = recommendation?.actionLabel.trim() ?? '';
+    final subtitle =
+        nudgeTitle.isNotEmpty && nudgeTitle.toLowerCase() != 'smart nudge'
+        ? nudgeTitle
+        : _metadataText(metadata['pattern_title']).isNotEmpty
+        ? _metadataText(metadata['pattern_title'])
+        : recommendation != null && _isAiEnhancedNudge(recommendation)
+        ? 'A small step for today'
+        : 'A small step for today';
+
+    final cardColor = isDark
+        ? Colors.white.withValues(alpha: 0.05)
+        : Colors.white;
+    final cardBorderColor = isDark
+        ? const Color(0xFFF3C765).withValues(alpha: 0.2)
+        : const Color(0xFFF3C765).withValues(alpha: 0.5);
+    final iconBgColor = isDark
+        ? const Color(0xFFF3C765).withValues(alpha: 0.15)
+        : const Color(0xFFFEF3D7);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cardColor,
+        border: Border.all(color: cardBorderColor, width: 1.5),
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: iconBgColor,
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: _AssistantLottieIcon(
+                  emoji: emoji,
+                  size: 36,
+                  fallbackFontSize: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    LocalizedText(
+                      'Smart nudge',
+                      style: TextStyle(
+                        color: pagePrimaryTextColor(context),
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    if (subtitle.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      LocalizedText(
+                        subtitle,
+                        style: TextStyle(
+                          color: pageSecondaryTextColor(context),
+                          fontSize: 12.5,
+                          height: 1.2,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (recommendation != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: severityColor.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: severityColor.withValues(alpha: 0.38),
+                    ),
+                  ),
+                  child: LocalizedText(
+                    _humanizeMetadataLabel(severity),
+                    style: TextStyle(
+                      color: severityColor,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          if (firstWeekLearning.isVisible) ...[
+            const SizedBox(height: 10),
+            FirstWeekLearningPill(
+              state: firstWeekLearning,
+              message: firstWeekLearning.assistantNudgeNote,
+              onGradient: false,
+              icon: Icons.psychology_alt_rounded,
+              maxLines: null,
+            ),
+          ],
+          const SizedBox(height: 14),
+          LocalizedText(
+            body,
+            style: TextStyle(
+              color: pagePrimaryTextColor(context),
+              fontSize: 14,
+              height: 1.35,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          if (mainFactor.isNotEmpty) ...[
+            const SizedBox(height: 11),
+            MainFactorLegend(
+              factor: mainFactor,
+              color: const Color(0xFFD69C12),
+            ),
+          ],
+          if (metadata['content_id'] == null && actionSteps.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _NudgeActionSteps(
+              steps: actionSteps,
+              foregroundColor: pageSecondaryTextColor(context),
+            ),
+          ] else if (metadata['content_id'] == null &&
+              actionLabel.isNotEmpty &&
+              actionLabel.toLowerCase() != 'continue') ...[
+            const SizedBox(height: 10),
+            _NudgeDetailLine(
+              icon: Icons.check_circle_outline_rounded,
+              text: actionLabel,
+              foregroundColor: pageSecondaryTextColor(context),
+            ),
+          ],
+          if (isLoading) ...[
+            const SizedBox(height: 14),
+            const AppSkeletonLine(height: 4),
+          ],
+          const SizedBox(height: 16),
+          ContentFreshnessNote(metadata: metadata),
+          if (onResponse != null && metadata['content_id'] != null)
+            NudgeResponseActions(
+              alternatives: alternatives,
+              enabled: !isUpdatingFeedback,
+              response: feedbackStatus,
+              onResponse: onResponse!,
+            )
+          else
+            _InsightFeedbackButtons(
+              status: feedbackStatus,
+              isUpdating: isUpdatingFeedback,
+              onLiked: onLiked,
+              onDisliked: onDisliked,
+              foregroundColor: pageSecondaryTextColor(context),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Color _severityColor(String severity, bool isDark) {
+    switch (severity.toLowerCase()) {
+      case 'needs support':
+        return isDark ? const Color(0xFFFF6B6B) : const Color(0xFFE53935);
+      case 'high':
+        return isDark ? const Color(0xFFFFB454) : const Color(0xFFF57C00);
+      case 'watch':
+        return isDark ? const Color(0xFFFFD54F) : const Color(0xFFD69C12);
+      default:
+        return isDark ? const Color(0xFF81D4FA) : const Color(0xFF0288D1);
+    }
+  }
+}
+
+class _NutritionInsightDialogCard extends StatelessWidget {
+  final NudgeAlternativeController? alternatives;
+  final ValueChanged<String>? onResponse;
+  final NutritionInsight insight;
+  final String? feedbackStatus;
+  final bool isUpdatingFeedback;
+  final VoidCallback onLiked;
+  final VoidCallback onDisliked;
+
+  const _NutritionInsightDialogCard({
+    this.alternatives,
+    this.onResponse,
+    required this.insight,
+    required this.feedbackStatus,
+    required this.isUpdatingFeedback,
+    required this.onLiked,
+    required this.onDisliked,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final accent = isDark ? const Color(0xFF8BE0BC) : const Color(0xFF178B57);
+    final macroFocus = _humanizeMetadataLabel(
+      _metadataText(insight.metadata['macro_focus']),
+    );
+    final foods = _metadataTextList(insight.metadata['recommended_foods']);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: isDark
+            ? Colors.white.withValues(alpha: 0.06)
+            : const Color(0xFFEAF8F1),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: pageBorderColor(context)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: Icon(
+                  Icons.restaurant_menu_rounded,
+                  color: accent,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    LocalizedText(
+                      'Nutrition nudge',
+                      style: TextStyle(
+                        color: pagePrimaryTextColor(context),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    LocalizedText(
+                      _humanizeMetadataLabel(insight.confidence.label),
+                      style: TextStyle(
+                        color: accent,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          LocalizedText(
+            _expandedAssistantText(insight.message),
+            style: TextStyle(
+              color: pageSecondaryTextColor(context),
+              fontSize: 13.5,
+              height: 1.4,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          if (_metadataText(insight.metadata['evidence']).isNotEmpty) ...[
+            const SizedBox(height: 8),
+            _NudgeDetailLine(
+              icon: Icons.info_outline_rounded,
+              text: _metadataText(insight.metadata['evidence']),
+              foregroundColor: pageSecondaryTextColor(context),
+            ),
+          ],
+          if (macroFocus.isNotEmpty || foods.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _NutritionMacroDetails(
+              macroFocus: macroFocus,
+              foods: foods,
+              accent: accent,
+            ),
+          ],
+          const SizedBox(height: 14),
+          ContentFreshnessNote(metadata: insight.metadata),
+          if (onResponse != null && insight.metadata['content_id'] != null)
+            NudgeResponseActions(
+              alternatives: alternatives,
+              enabled: !isUpdatingFeedback,
+              response: feedbackStatus,
+              accentColor: accent,
+              onResponse: onResponse!,
+            )
+          else
+            _InsightFeedbackButtons(
+              status: feedbackStatus,
+              isUpdating: isUpdatingFeedback,
+              onLiked: onLiked,
+              onDisliked: onDisliked,
+              foregroundColor: accent,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NutritionMacroDetails extends StatelessWidget {
+  final String macroFocus;
+  final List<String> foods;
+  final Color accent;
+
+  const _NutritionMacroDetails({
+    required this.macroFocus,
+    required this.foods,
+    required this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: accent.withValues(alpha: 0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (macroFocus.isNotEmpty)
+            LocalizedText(
+              macroFocus,
+              style: TextStyle(
+                color: pagePrimaryTextColor(context),
+                fontSize: 12.5,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          if (foods.isNotEmpty) ...[
+            if (macroFocus.isNotEmpty) const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: foods
+                  .map(
+                    (food) => Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: accent.withValues(alpha: 0.22),
+                        ),
+                      ),
+                      child: LocalizedText(
+                        food,
+                        style: TextStyle(
+                          color: pagePrimaryTextColor(context),
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _NudgeDetailLine extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final Color foregroundColor;
+
+  const _NudgeDetailLine({
+    required this.icon,
+    required this.text,
+    required this.foregroundColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, color: foregroundColor.withValues(alpha: 0.86), size: 17),
+        const SizedBox(width: 7),
+        Expanded(
+          child: LocalizedText(
+            text,
+            style: TextStyle(
+              color: foregroundColor.withValues(alpha: 0.9),
+              fontSize: 12.5,
+              height: 1.35,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _NudgeActionSteps extends StatelessWidget {
+  final List<String> steps;
+  final Color foregroundColor;
+
+  const _NudgeActionSteps({required this.steps, required this.foregroundColor});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: steps
+          .map(
+            (step) => Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: _NudgeDetailLine(
+                icon: Icons.check_circle_outline_rounded,
+                text: step,
+                foregroundColor: foregroundColor,
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+}
+
+class _NutritionInsightEmptyCard extends StatelessWidget {
+  final bool isLoading;
+
+  const _NutritionInsightEmptyCard({required this.isLoading});
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final accent = isDark ? const Color(0xFF8BE0BC) : const Color(0xFF178B57);
+
+    if (isLoading) {
+      return const AppSkeletonCard(
+        height: 150,
+        lineCount: 2,
+        padding: EdgeInsets.all(16),
+        radius: 22,
+      );
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: isDark
+            ? Colors.white.withValues(alpha: 0.06)
+            : const Color(0xFFEAF8F1),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: pageBorderColor(context)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: Icon(
+                  Icons.restaurant_menu_rounded,
+                  color: accent,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: LocalizedText(
+                  'Nutrition nudge',
+                  style: TextStyle(
+                    color: pagePrimaryTextColor(context),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          LocalizedText(
+            'No other nutrition suggestion fits right now.',
+            style: TextStyle(
+              color: pageSecondaryTextColor(context),
+              fontSize: 13.5,
+              height: 1.4,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InsightFeedbackButtons extends StatelessWidget {
+  final String? status;
+  final bool isUpdating;
+  final VoidCallback? onLiked;
+  final VoidCallback? onDisliked;
+  final Color foregroundColor;
+
+  const _InsightFeedbackButtons({
+    required this.status,
+    required this.isUpdating,
+    required this.onLiked,
+    required this.onDisliked,
+    required this.foregroundColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final liked = status == 'accepted';
+    final disliked = status == 'dismissed';
+    final disabled = isUpdating || onLiked == null || onDisliked == null;
+
+    return Row(
+      children: [
+        _InsightFeedbackIconButton(
+          tooltip: liked ? 'Liked' : 'Like insight',
+          icon: liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+          selected: liked,
+          isBusy: isUpdating && liked,
+          foregroundColor: foregroundColor,
+          onPressed: disabled || liked ? null : onLiked,
+        ),
+        const SizedBox(width: 8),
+        _InsightFeedbackIconButton(
+          tooltip: disliked ? 'Disliked' : 'Dislike insight',
+          icon: disliked
+              ? Icons.thumb_down_alt_rounded
+              : Icons.thumb_down_alt_outlined,
+          selected: disliked,
+          isBusy: isUpdating && disliked,
+          foregroundColor: foregroundColor,
+          onPressed: disabled || disliked ? null : onDisliked,
+        ),
+      ],
+    );
+  }
+}
+
+class _InsightFeedbackIconButton extends StatelessWidget {
+  final String tooltip;
+  final IconData icon;
+  final bool selected;
+  final bool isBusy;
+  final Color foregroundColor;
+  final VoidCallback? onPressed;
+
+  const _InsightFeedbackIconButton({
+    required this.tooltip,
+    required this.icon,
+    required this.selected,
+    required this.isBusy,
+    required this.foregroundColor,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedColor = selected
+        ? foregroundColor
+        : foregroundColor.withValues(alpha: 0.82);
+
+    return Tooltip(
+      message: tooltip.localizedCopy(context),
+      child: SizedBox(
+        width: 44,
+        height: 40,
+        child: OutlinedButton(
+          onPressed: onPressed,
+          style: OutlinedButton.styleFrom(
+            foregroundColor: selectedColor,
+            disabledForegroundColor: selectedColor.withValues(alpha: 0.62),
+            backgroundColor: selected
+                ? foregroundColor.withValues(alpha: 0.18)
+                : Colors.transparent,
+            side: BorderSide(
+              color: foregroundColor.withValues(alpha: selected ? 0.64 : 0.38),
+            ),
+            padding: EdgeInsets.zero,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+          ),
+          child: isBusy
+              ? SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: selectedColor,
+                  ),
+                )
+              : Icon(icon, size: 19),
+        ),
+      ),
+    );
+  }
+}
+
+String _expandedAssistantText(String value) {
+  return value.replaceAll(RegExp(r'[ \t]+'), ' ').trim();
+}
+
+String _metadataText(dynamic value) {
+  return value?.toString().replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+}
+
+List<String> _metadataTextList(dynamic value) {
+  if (value is List) {
+    return value.map(_metadataText).where((item) => item.isNotEmpty).toList();
+  }
+
+  final text = _metadataText(value);
+  if (text.isEmpty) {
+    return const [];
+  }
+
+  return text
+      .split(',')
+      .map((item) => item.trim())
+      .where((item) => item.isNotEmpty)
+      .toList();
+}
+
+String _humanizeMetadataLabel(String value) {
+  if (value.isEmpty) {
+    return '';
+  }
+
+  final normalized = value.replaceAll('_', ' ').trim();
+  if (normalized.isEmpty) {
+    return '';
+  }
+
+  return normalized[0].toUpperCase() + normalized.substring(1);
+}

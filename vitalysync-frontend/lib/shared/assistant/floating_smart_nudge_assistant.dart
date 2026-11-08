@@ -1,0 +1,1015 @@
+import 'dart:async';
+import 'dart:math';
+import '../notifications/smart_nudge_delivery_service.dart';
+
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:lottie/lottie.dart';
+
+import '../../features/adaptive/data/adaptive_nudge_api.dart';
+import '../../features/adaptive/data/nudge_alternative_controller.dart';
+import '../../features/adaptive/data/wellness_content_api.dart';
+import '../widgets/wellness_content_widgets.dart';
+import '../../features/activity/data/activity_service.dart';
+import '../../features/exercise/data/exercise_goal_service.dart';
+import '../../features/exercise/data/exercise_recommendation_model.dart';
+import '../../features/exercise/data/exercise_recommendation_service.dart';
+import '../../features/exercise/presentation/widgets/assistant_exercise_card.dart';
+import '../../features/exercise/presentation/widgets/selected_exercise_goal_card.dart';
+import '../../features/home/data/environment_model.dart';
+import '../../features/home/data/environment_localization.dart';
+import '../../l10n/l10n.dart';
+import '../../features/log/data/check_in_models.dart';
+import '../../features/log/data/check_in_state_coordinator.dart';
+import '../../features/log/data/log_api.dart';
+import '../../features/log/data/quick_check_in_preset_api.dart';
+import '../../features/log/data/weekly_assessment_api.dart';
+import '../../features/log/presentation/widgets/check_in_success_view.dart';
+import '../../features/log/presentation/widgets/log_widgets.dart';
+import '../../features/log/presentation/widgets/saved_check_in_preset_dialog.dart';
+import '../../features/onboarding/data/burnout_baseline_questions.dart';
+import '../../features/nutrition/data/nutrition_analyzer.dart';
+import '../../features/nutrition/data/nutrition_coach.dart';
+import '../../features/nutrition/data/nutrition_insight_store.dart';
+import '../../features/nutrition/data/nutrition_reminder_engine.dart';
+import '../../features/onboarding/services/onboarding_service.dart';
+import '../learning/first_week_learning_service.dart';
+import '../theme/app_page_style.dart';
+import '../widgets/app_skeleton.dart';
+import '../widgets/first_week_learning_pill.dart';
+import 'package:vitalysync/l10n/localized_text.dart';
+
+part 'assistant_bubbles.dart';
+part 'assistant_experience_panel.dart';
+part 'assistant_quick_log_bar.dart';
+part 'smart_nudge_dialog_card.dart';
+part 'smart_nudge_notification_view.dart';
+part 'weekly_pulse_widgets.dart';
+part 'assistant_visual_widgets.dart';
+
+const _assistantAnimationPath = 'assets/animations/Assistant.json';
+const _assistantLandscapeMaxWidth = 720.0;
+const _assistantLandscapeMaxHeight = 320.0;
+const _assistantLandscapeContentScale = 0.72;
+const _assistantSmartNudgeSectionIndex = 0;
+const _assistantCheckInSectionIndex = 1;
+const _assistantExerciseSectionIndex = 2;
+
+enum _AssistantBubbleKind { smartNudge, nutrition, exercise }
+
+enum _AssistantDockEdge { left, right }
+
+bool _isAiEnhancedNudge(AdaptiveNudgeRecommendation recommendation) {
+  return recommendation.metadata['ai_enhanced'] == true;
+}
+
+List<AdaptiveNudgeRecommendation> prioritizeAssistantNudges(
+  List<AdaptiveNudgeRecommendation> recommendations,
+) {
+  final unique = <String, AdaptiveNudgeRecommendation>{};
+  for (final recommendation in recommendations) {
+    final key =
+        '${recommendation.nudgeEventId ?? 0}:${recommendation.nudgeType}:${recommendation.title}';
+    unique[key] = recommendation;
+  }
+
+  final visibleItems = unique.values
+      .where(
+        (item) => item.metadata['assistant_feedback_status'] != 'dismissed',
+      )
+      .toList();
+  final items = visibleItems.isEmpty ? unique.values.toList() : visibleItems;
+
+  return items;
+}
+
+class FloatingSmartNudgeAssistant extends StatefulWidget {
+  final String message;
+  final String emoji;
+  final double buttonSize;
+  final Duration autoHideDuration;
+  final VoidCallback? onLogMealRequested;
+  final VoidCallback? onLogPageRequested;
+  final VoidCallback? onQuickCheckInRequested;
+  final bool showLogSwipeHint;
+  final Key? tutorialButtonKey;
+
+  const FloatingSmartNudgeAssistant({
+    super.key,
+    required this.message,
+    this.emoji = '\u{1F499}',
+    this.buttonSize = 54,
+    this.autoHideDuration = const Duration(seconds: 10),
+    this.onLogMealRequested,
+    this.onLogPageRequested,
+    this.onQuickCheckInRequested,
+    this.showLogSwipeHint = false,
+    this.tutorialButtonKey,
+  });
+
+  @override
+  State<FloatingSmartNudgeAssistant> createState() =>
+      _FloatingSmartNudgeAssistantState();
+}
+
+class AssistantFloatingBubbleVisual extends StatefulWidget {
+  final String emoji;
+  final double size;
+  final bool showOuterShadow;
+
+  const AssistantFloatingBubbleVisual({
+    super.key,
+    this.emoji = '\u{1F499}',
+    this.size = 58,
+    this.showOuterShadow = true,
+  });
+
+  @override
+  State<AssistantFloatingBubbleVisual> createState() =>
+      _AssistantFloatingBubbleVisualState();
+}
+
+class _AssistantFloatingBubbleVisualState
+    extends State<AssistantFloatingBubbleVisual> {
+  bool? _hasPendingWeeklyPulse;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadWeeklyPulseIndicator());
+  }
+
+  Future<void> _loadWeeklyPulseIndicator() async {
+    try {
+      final status = await LogApi.fetchCheckInStatus();
+      if (!mounted) return;
+
+      setState(() {
+        _hasPendingWeeklyPulse =
+            status.requiredMode == CheckInMode.weekly && !status.isComplete;
+      });
+    } catch (_) {
+      if (!mounted) return;
+
+      setState(() {
+        _hasPendingWeeklyPulse = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: _FloatingHeartButton(
+        emoji: widget.emoji,
+        size: widget.size,
+        isActive: false,
+        isDragging: false,
+        hasPendingWeeklyPulse: _hasPendingWeeklyPulse == true,
+        showOuterShadow: widget.showOuterShadow,
+        onTap: () {},
+      ),
+    );
+  }
+}
+
+class _FloatingSmartNudgeAssistantState
+    extends State<FloatingSmartNudgeAssistant>
+    with WidgetsBindingObserver {
+  static const _moveAnimationDuration = Duration(milliseconds: 220);
+  static const _logSwipeReminderInterval = Duration(minutes: 1);
+
+  bool _isBubbleVisible = false;
+  _AssistantBubbleKind _activeBubbleKind = _AssistantBubbleKind.smartNudge;
+  bool _isDragging = false;
+  bool _isDialogOpen = false;
+  bool _hasCustomPosition = false;
+  _AssistantDockEdge _dockEdge = _AssistantDockEdge.right;
+  Offset _buttonOffset = Offset.zero;
+  Timer? _bubbleSwitchTimer;
+  Timer? _logSwipeReminderTimer;
+  List<ExerciseRecommendationModel> _recommendations = const [];
+  List<AdaptiveNudgeRecommendation> _adaptiveNudges = const [];
+  NutritionInsight? _nutritionInsight;
+  Future<List<AdaptiveNudgeRecommendation>>? _adaptiveNudgeLoadFuture;
+  Future<NutritionInsight?>? _nutritionInsightLoadFuture;
+  bool _hasLoadedAdaptiveNudges = false;
+  bool _hasLoadedNutritionInsight = false;
+  int _lastCompletionEventId = 0;
+  bool? _hasPendingWeeklyPulse;
+
+  final ExerciseRecommendationService _recommendationService =
+      const ExerciseRecommendationService();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WellnessContentApi.changes.addListener(_refreshWellnessContent);
+    unawaited(ActivityService.instance.startTracking());
+    unawaited(ExerciseGoalService.instance.start());
+    ExerciseGoalService.instance.notifier.addListener(_handleGoalEvent);
+    unawaited(_loadRecommendations());
+    unawaited(_loadAdaptiveNudges());
+    unawaited(_loadNutritionInsight());
+    unawaited(_loadWeeklyPulseIndicator());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (widget.showLogSwipeHint) {
+        _startLogSwipeReminders();
+      } else {
+        _showBubble();
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant FloatingSmartNudgeAssistant oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.showLogSwipeHint && !oldWidget.showLogSwipeHint) {
+      _startLogSwipeReminders();
+    } else if (!widget.showLogSwipeHint && oldWidget.showLogSwipeHint) {
+      _logSwipeReminderTimer?.cancel();
+      _logSwipeReminderTimer = null;
+      _hideBubble();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && widget.showLogSwipeHint) {
+      _startLogSwipeReminders();
+    } else if (state != AppLifecycleState.resumed && widget.showLogSwipeHint) {
+      _logSwipeReminderTimer?.cancel();
+      _logSwipeReminderTimer = null;
+      _hideBubble();
+    }
+  }
+
+  void _startLogSwipeReminders() {
+    if (_logSwipeReminderTimer != null) return;
+    if (!_isDialogOpen) _showBubble();
+    _logSwipeReminderTimer = Timer.periodic(_logSwipeReminderInterval, (_) {
+      if (mounted && widget.showLogSwipeHint && !_isDialogOpen) {
+        _showBubble();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    WellnessContentApi.changes.removeListener(_refreshWellnessContent);
+    _bubbleSwitchTimer?.cancel();
+    _logSwipeReminderTimer?.cancel();
+    ExerciseGoalService.instance.notifier.removeListener(_handleGoalEvent);
+    super.dispose();
+  }
+
+  void _refreshWellnessContent() {
+    unawaited(_loadAdaptiveNudges());
+    unawaited(_loadNutritionInsight(forceRefresh: true));
+  }
+
+  Future<List<ExerciseRecommendationModel>> _loadRecommendations() async {
+    await ActivityService.instance.startTracking(refreshFromBackend: false);
+
+    try {
+      final recommendations = await _recommendationService
+          .loadRecommendations();
+      if (!mounted) return recommendations;
+
+      setState(() {
+        _recommendations = recommendations;
+      });
+      return recommendations;
+    } catch (_) {
+      return _recommendations;
+    }
+  }
+
+  Future<EnvironmentSnapshot?> _loadEnvironmentSnapshot() {
+    return _recommendationService.loadEnvironmentSnapshot();
+  }
+
+  Future<List<AdaptiveNudgeRecommendation>> _loadAdaptiveNudges({
+    bool forceRefresh = false,
+  }) async {
+    if (!forceRefresh && _adaptiveNudgeLoadFuture != null) {
+      return _adaptiveNudgeLoadFuture!;
+    }
+
+    late final Future<List<AdaptiveNudgeRecommendation>> loadFuture;
+    loadFuture = _loadAdaptiveNudgesInternal(forceRefresh: forceRefresh)
+        .whenComplete(() {
+          if (identical(_adaptiveNudgeLoadFuture, loadFuture)) {
+            _adaptiveNudgeLoadFuture = null;
+          }
+        });
+    _adaptiveNudgeLoadFuture = loadFuture;
+    return loadFuture;
+  }
+
+  Future<List<AdaptiveNudgeRecommendation>> _loadAdaptiveNudgesInternal({
+    bool forceRefresh = false,
+  }) async {
+    try {
+      final response = await AdaptiveNudgeApi.fetchAssistantRecommendations(
+        limit: 3,
+        forceRefresh: forceRefresh,
+      );
+      final recommendations = prioritizeAssistantNudges(
+        response.recommendations,
+      );
+      if (!mounted) {
+        return recommendations;
+      }
+
+      setState(() {
+        _adaptiveNudges = recommendations;
+        _hasLoadedAdaptiveNudges = true;
+      });
+
+      return recommendations;
+    } catch (_) {
+      if (!mounted) {
+        return _adaptiveNudges;
+      }
+
+      setState(() {
+        _hasLoadedAdaptiveNudges = true;
+      });
+      return _adaptiveNudges;
+    }
+  }
+
+  Future<NutritionInsight?> _loadNutritionInsight({
+    bool forceRefresh = false,
+  }) async {
+    if (!forceRefresh && _nutritionInsightLoadFuture != null) {
+      return _nutritionInsightLoadFuture!;
+    }
+
+    late final Future<NutritionInsight?> loadFuture;
+    loadFuture = _loadNutritionInsightInternal(forceRefresh: forceRefresh)
+        .whenComplete(() {
+          if (identical(_nutritionInsightLoadFuture, loadFuture)) {
+            _nutritionInsightLoadFuture = null;
+          }
+        });
+    _nutritionInsightLoadFuture = loadFuture;
+    return loadFuture;
+  }
+
+  Future<NutritionInsight?> _loadNutritionInsightInternal({
+    bool forceRefresh = false,
+  }) async {
+    try {
+      final insight = await NutritionReminderEngine.instance
+          .assistantInsightForToday(forceRefresh: forceRefresh);
+      if (!mounted) {
+        return insight;
+      }
+
+      setState(() {
+        _nutritionInsight = insight;
+        _hasLoadedNutritionInsight = true;
+      });
+      return insight;
+    } catch (_) {
+      if (!mounted) {
+        return _nutritionInsight;
+      }
+
+      setState(() {
+        _hasLoadedNutritionInsight = true;
+      });
+      return _nutritionInsight;
+    }
+  }
+
+  Future<void> _loadWeeklyPulseIndicator() async {
+    try {
+      final status = await LogApi.fetchCheckInStatus();
+      if (!mounted) return;
+
+      setState(() {
+        _hasPendingWeeklyPulse =
+            status.requiredMode == CheckInMode.weekly && !status.isComplete;
+      });
+    } catch (_) {
+      if (!mounted) return;
+
+      setState(() {
+        _hasPendingWeeklyPulse = false;
+      });
+    }
+  }
+
+  void _handleGoalEvent() {
+    final state = ExerciseGoalService.instance.notifier.value;
+    if (state.completionEventId == _lastCompletionEventId ||
+        state.completionMessage == null) {
+      return;
+    }
+
+    _lastCompletionEventId = state.completionEventId;
+    final completedGoal = state.goal;
+    if (completedGoal != null &&
+        completedGoal.isCompleted &&
+        !completedGoal.isNoneToday) {
+      unawaited(
+        LogApi.applyExerciseGoalSelection(completedGoal).catchError((_) {
+          return <String, dynamic>{};
+        }),
+      );
+    }
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: LocalizedText(state.completionMessage!)));
+  }
+
+  void _showBubble() {
+    _bubbleSwitchTimer?.cancel();
+
+    setState(() {
+      _isBubbleVisible = true;
+      _activeBubbleKind = _availableBubbleKinds().first;
+    });
+
+    _scheduleNextBubble();
+  }
+
+  void _hideBubble() {
+    _bubbleSwitchTimer?.cancel();
+
+    if (!mounted || !_isBubbleVisible) return;
+
+    setState(() {
+      _isBubbleVisible = false;
+    });
+  }
+
+  List<_AssistantBubbleKind> _availableBubbleKinds() {
+    return [
+      _AssistantBubbleKind.smartNudge,
+      if (_nutritionInsight != null &&
+          _nutritionInsight!.message.trim().isNotEmpty)
+        _AssistantBubbleKind.nutrition,
+      _AssistantBubbleKind.exercise,
+    ];
+  }
+
+  void _scheduleNextBubble() {
+    _bubbleSwitchTimer?.cancel();
+    _bubbleSwitchTimer = Timer(widget.autoHideDuration, _advanceBubblePreview);
+  }
+
+  void _advanceBubblePreview() {
+    if (!mounted || !_isBubbleVisible) return;
+
+    if (widget.showLogSwipeHint) {
+      _hideBubble();
+      return;
+    }
+
+    final bubbleKinds = _availableBubbleKinds();
+    final currentIndex = bubbleKinds.indexOf(_activeBubbleKind);
+    final nextIndex = currentIndex < 0 ? 0 : currentIndex + 1;
+
+    if (nextIndex >= bubbleKinds.length) {
+      _hideBubble();
+      return;
+    }
+
+    setState(() {
+      _activeBubbleKind = bubbleKinds[nextIndex];
+    });
+
+    _scheduleNextBubble();
+  }
+
+  Future<void> _openAssistantDialog({
+    int initialSectionIndex = _assistantSmartNudgeSectionIndex,
+  }) async {
+    if (_isDialogOpen) {
+      return;
+    }
+
+    _bubbleSwitchTimer?.cancel();
+    setState(() {
+      _isDialogOpen = true;
+      _isBubbleVisible = false;
+    });
+
+    if (!mounted) return;
+
+    try {
+      await showGeneralDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: MaterialLocalizations.of(
+          context,
+        ).modalBarrierDismissLabel,
+        barrierColor: Colors.black.withValues(alpha: 0.42),
+        transitionDuration: const Duration(milliseconds: 260),
+        pageBuilder: (dialogContext, _, _) {
+          return SafeArea(
+            minimum: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return Center(
+                  child: SizedBox(
+                    width: constraints.maxWidth,
+                    height: min(
+                      MediaQuery.sizeOf(context).height * 0.76,
+                      constraints.maxHeight,
+                    ),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: AssistantExperiencePanel(
+                        message: widget.message,
+                        emoji: widget.emoji,
+                        recommendations: _recommendations,
+                        adaptiveNudges: _adaptiveNudges,
+                        nutritionInsight: _nutritionInsight,
+                        hasLoadedAdaptiveNudges: _hasLoadedAdaptiveNudges,
+                        hasLoadedNutritionInsight: _hasLoadedNutritionInsight,
+                        initialSectionIndex: initialSectionIndex,
+                        onRefreshRecommendations: _loadRecommendations,
+                        onRefreshAdaptiveNudges: _loadAdaptiveNudges,
+                        onRefreshNutritionInsight: _loadNutritionInsight,
+                        onRefreshEnvironment: _loadEnvironmentSnapshot,
+                        onLogMealRequested: widget.onLogMealRequested,
+                        onLogPageRequested: widget.onLogPageRequested,
+                        onQuickCheckInRequested: widget.onQuickCheckInRequested,
+                        useSafeAreaPadding: false,
+                        onClose: () => Navigator.of(dialogContext).pop(),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          );
+        },
+        transitionBuilder: (context, animation, _, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+            reverseCurve: Curves.easeInCubic,
+          );
+          return FadeTransition(
+            opacity: curved,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.96, end: 1).animate(curved),
+              child: child,
+            ),
+          );
+        },
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isDialogOpen = false;
+        });
+      }
+    }
+
+    if (!mounted) return;
+
+    await _loadWeeklyPulseIndicator();
+  }
+
+  void _handleAssistantTap() {
+    _openAssistantDialog();
+  }
+
+  void _openExerciseDialog() {
+    _openAssistantDialog(initialSectionIndex: _assistantExerciseSectionIndex);
+  }
+
+  Future<void> _acceptExercisePreview(
+    ExerciseRecommendationModel recommendation,
+  ) async {
+    if (ExerciseGoalService.instance.notifier.value.isSaving) {
+      return;
+    }
+
+    _bubbleSwitchTimer?.cancel();
+    try {
+      final goal = await ExerciseGoalService.instance.chooseExercise(
+        recommendation,
+      );
+      var appliedToLog = false;
+      var queuedForLog = false;
+
+      try {
+        final result = await LogApi.applyExerciseGoalSelection(goal);
+        appliedToLog = result['exercise_applied_to_log'] == true;
+        queuedForLog = result['exercise_applied_to_log'] == false;
+      } catch (_) {
+        // The goal remains saved locally even if today's log sync is delayed.
+      }
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: LocalizedText(
+            _exerciseSelectionMessage(
+              exerciseName: goal.exerciseName,
+              isNoneToday: goal.isNoneToday,
+              appliedToLog: appliedToLog,
+              queuedForLog: queuedForLog,
+            ),
+          ),
+        ),
+      );
+
+      if (goal.isNoneToday) {
+        setState(() {
+          _isBubbleVisible = true;
+          _activeBubbleKind = _AssistantBubbleKind.exercise;
+        });
+        _scheduleNextBubble();
+        return;
+      }
+
+      await _openAssistantDialog(
+        initialSectionIndex: _assistantExerciseSectionIndex,
+      );
+    } catch (error) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: LocalizedText(
+            'Unable to save exercise: ${error.toString().replaceFirst('Exception: ', '')}',
+          ),
+        ),
+      );
+      _scheduleNextBubble();
+    }
+  }
+
+  String _exerciseSelectionMessage({
+    required String exerciseName,
+    required bool isNoneToday,
+    required bool appliedToLog,
+    required bool queuedForLog,
+  }) {
+    final normalizedName = LogApi.normalizeExerciseNameForLog(exerciseName);
+    var message = '$exerciseName saved as today\'s goal.';
+    if (isNoneToday) {
+      message = 'Rest choice saved for today.';
+      if (appliedToLog) {
+        message += ' Today\'s log now shows None.';
+      } else if (queuedForLog) {
+        message += ' None will prefill the log page.';
+      }
+    } else if (appliedToLog) {
+      message += ' $normalizedName also updated today\'s log.';
+    } else if (queuedForLog) {
+      message += ' $normalizedName will prefill the log page.';
+    }
+
+    return message;
+  }
+
+  EdgeInsets _dragPadding(BuildContext context, Size bounds) {
+    final safePadding = MediaQuery.paddingOf(context);
+
+    return EdgeInsets.only(
+      left: safePadding.left,
+      top: safePadding.top + 12,
+      right: safePadding.right,
+      bottom: safePadding.bottom + 16,
+    );
+  }
+
+  Offset _defaultButtonOffset(Size bounds, EdgeInsets padding) {
+    return Offset(
+      max(padding.left, bounds.width - padding.right - widget.buttonSize),
+      padding.top + 112,
+    );
+  }
+
+  Offset _clampButtonOffset(Offset offset, Size bounds, EdgeInsets padding) {
+    final maxX = max(
+      padding.left,
+      bounds.width - padding.right - widget.buttonSize,
+    );
+    final maxY = max(
+      padding.top,
+      bounds.height - padding.bottom - widget.buttonSize,
+    );
+
+    return Offset(
+      offset.dx.clamp(padding.left, maxX).toDouble(),
+      offset.dy.clamp(padding.top, maxY).toDouble(),
+    );
+  }
+
+  double _dockedButtonX(
+    _AssistantDockEdge edge,
+    Size bounds,
+    EdgeInsets padding,
+  ) {
+    final maxX = max(
+      padding.left,
+      bounds.width - padding.right - widget.buttonSize,
+    );
+
+    return edge == _AssistantDockEdge.left ? padding.left : maxX;
+  }
+
+  _AssistantDockEdge _nearestDockEdge(Offset offset, Size bounds) {
+    return offset.dx + (widget.buttonSize / 2) < bounds.width / 2
+        ? _AssistantDockEdge.left
+        : _AssistantDockEdge.right;
+  }
+
+  Offset _snapButtonOffsetToEdge(
+    Offset offset,
+    Size bounds,
+    EdgeInsets padding,
+    _AssistantDockEdge edge,
+  ) {
+    final clampedOffset = _clampButtonOffset(offset, bounds, padding);
+    return Offset(_dockedButtonX(edge, bounds, padding), clampedOffset.dy);
+  }
+
+  Offset _effectiveButtonOffset(Size bounds, EdgeInsets padding) {
+    if (!_hasCustomPosition) {
+      return _defaultButtonOffset(bounds, padding);
+    }
+
+    if (_isDragging) {
+      return _clampButtonOffset(_buttonOffset, bounds, padding);
+    }
+
+    return _snapButtonOffsetToEdge(_buttonOffset, bounds, padding, _dockEdge);
+  }
+
+  void _handlePanStart(Size bounds, EdgeInsets padding) {
+    _bubbleSwitchTimer?.cancel();
+    final currentOffset = _effectiveButtonOffset(bounds, padding);
+
+    setState(() {
+      _isDragging = true;
+      _hasCustomPosition = true;
+      _buttonOffset = currentOffset;
+    });
+  }
+
+  void _handlePanUpdate(
+    DragUpdateDetails details,
+    Size bounds,
+    EdgeInsets padding,
+  ) {
+    setState(() {
+      _buttonOffset = _clampButtonOffset(
+        _buttonOffset + details.delta,
+        bounds,
+        padding,
+      );
+    });
+  }
+
+  void _handlePanEnd(Size bounds, EdgeInsets padding) {
+    final dockEdge = _nearestDockEdge(_buttonOffset, bounds);
+
+    setState(() {
+      _isDragging = false;
+      _dockEdge = dockEdge;
+      _buttonOffset = _snapButtonOffsetToEdge(
+        _buttonOffset,
+        bounds,
+        padding,
+        dockEdge,
+      );
+    });
+
+    if (_isBubbleVisible) {
+      _scheduleNextBubble();
+    }
+  }
+
+  Widget _buildActiveBubble(
+    ExerciseGoalState goalState, {
+    required bool tailOnRight,
+    required bool tailAtBottom,
+  }) {
+    if (widget.showLogSwipeHint) {
+      return _SmartNudgeBubble(
+        emoji: widget.emoji,
+        message: 'swipe left for quick check in',
+        onClose: _hideBubble,
+        onAction: widget.onQuickCheckInRequested,
+        tailOnRight: tailOnRight,
+        tailAtBottom: tailAtBottom,
+      );
+    }
+
+    final primaryNudge = _adaptiveNudges.isEmpty ? null : _adaptiveNudges.first;
+
+    switch (_activeBubbleKind) {
+      case _AssistantBubbleKind.nutrition:
+        final insight = _nutritionInsight;
+        if (insight == null) {
+          return WellnessContentExposure(
+            content: primaryNudge?.toJson(),
+            child: _SmartNudgeBubble(
+              emoji: widget.emoji,
+              message: primaryNudge?.message ?? widget.message,
+              onClose: _hideBubble,
+              tailOnRight: tailOnRight,
+              tailAtBottom: tailAtBottom,
+            ),
+          );
+        }
+
+        return WellnessContentExposure(
+          content: insight.toJson(),
+          child: _NutritionNudgeBubble(
+            insight: insight,
+            onClose: _hideBubble,
+            tailOnRight: tailOnRight,
+            tailAtBottom: tailAtBottom,
+          ),
+        );
+      case _AssistantBubbleKind.exercise:
+        return _ExercisePreviewBubble(
+          goalState: goalState,
+          recommendations: _recommendations,
+          onClose: _hideBubble,
+          onChoose: _openExerciseDialog,
+          onAccept: _acceptExercisePreview,
+          tailOnRight: tailOnRight,
+          tailAtBottom: tailAtBottom,
+        );
+      case _AssistantBubbleKind.smartNudge:
+        return WellnessContentExposure(
+          content: primaryNudge?.toJson(),
+          child: _SmartNudgeBubble(
+            emoji: widget.emoji,
+            message: primaryNudge?.message ?? widget.message,
+            onClose: _hideBubble,
+            tailOnRight: tailOnRight,
+            tailAtBottom: tailAtBottom,
+          ),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final fallbackSize = MediaQuery.sizeOf(context);
+        final bounds = Size(
+          constraints.maxWidth.isFinite
+              ? constraints.maxWidth
+              : fallbackSize.width,
+          constraints.maxHeight.isFinite
+              ? constraints.maxHeight
+              : fallbackSize.height,
+        );
+
+        if (bounds.width <= 0 || bounds.height <= 0) {
+          return const SizedBox.shrink();
+        }
+
+        final padding = _dragPadding(context, bounds);
+        final buttonOffset = _effectiveButtonOffset(bounds, padding);
+        final isDockedRight = _dockEdge == _AssistantDockEdge.right;
+        final bubbleOpensUpward =
+            buttonOffset.dy + (widget.buttonSize / 2) > bounds.height / 2;
+        const bubbleGap = 10.0;
+        // Bubble sits beside the button, on the opposite side of the dock.
+        final availableWidth = isDockedRight
+            ? buttonOffset.dx - padding.left - bubbleGap
+            : bounds.width -
+                  padding.right -
+                  buttonOffset.dx -
+                  widget.buttonSize -
+                  bubbleGap;
+        final maxBubbleWidth = min(max(availableWidth, 200.0), 356.0);
+        final bubbleLeft = isDockedRight
+            ? max(padding.left, buttonOffset.dx - bubbleGap - maxBubbleWidth)
+            : buttonOffset.dx + widget.buttonSize + bubbleGap;
+        final bubbleTop = bubbleOpensUpward ? null : buttonOffset.dy;
+        final bubbleBottom = bubbleOpensUpward
+            ? bounds.height - buttonOffset.dy - widget.buttonSize
+            : null;
+        final maxBubbleHeight = max(
+          1.0,
+          bubbleOpensUpward
+              ? buttonOffset.dy + widget.buttonSize - padding.top
+              : bounds.height - padding.bottom - buttonOffset.dy,
+        );
+        // Horizontal slide animation toward the button.
+        final bubbleSlideOffset = isDockedRight
+            ? const Offset(0.08, 0)
+            : const Offset(-0.08, 0);
+        final moveDuration = _isDragging
+            ? Duration.zero
+            : _moveAnimationDuration;
+
+        return SizedBox.expand(
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              AnimatedPositioned(
+                duration: moveDuration,
+                curve: Curves.easeOutCubic,
+                left: bubbleLeft,
+                top: bubbleTop,
+                bottom: bubbleBottom,
+                width: maxBubbleWidth,
+                child: IgnorePointer(
+                  ignoring: !_isBubbleVisible,
+                  child: AnimatedSlide(
+                    duration: const Duration(milliseconds: 240),
+                    curve: Curves.easeOutCubic,
+                    offset: _isBubbleVisible ? Offset.zero : bubbleSlideOffset,
+                    child: AnimatedOpacity(
+                      key: const ValueKey('assistant-bubble-visibility'),
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOut,
+                      opacity: _isBubbleVisible ? 1 : 0,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(maxHeight: maxBubbleHeight),
+                        child: SingleChildScrollView(
+                          primary: false,
+                          physics: const BouncingScrollPhysics(
+                            parent: ClampingScrollPhysics(),
+                          ),
+                          child: AnimatedSize(
+                            duration: const Duration(milliseconds: 220),
+                            curve: Curves.easeOutCubic,
+                            alignment: bubbleOpensUpward
+                                ? Alignment.bottomCenter
+                                : Alignment.topCenter,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                              ),
+                              child: ValueListenableBuilder<ExerciseGoalState>(
+                                valueListenable:
+                                    ExerciseGoalService.instance.notifier,
+                                builder: (context, goalState, _) =>
+                                    KeyedSubtree(
+                                      key: ValueKey(_activeBubbleKind),
+                                      child: _buildActiveBubble(
+                                        goalState,
+                                        tailOnRight: isDockedRight,
+                                        tailAtBottom: bubbleOpensUpward,
+                                      ),
+                                    ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              AnimatedPositioned(
+                duration: moveDuration,
+                curve: Curves.easeOutCubic,
+                left: buttonOffset.dx,
+                top: buttonOffset.dy,
+                child: GestureDetector(
+                  key: const ValueKey('floating-assistant-button'),
+                  behavior: HitTestBehavior.opaque,
+                  onPanStart: (_) => _handlePanStart(bounds, padding),
+                  onPanUpdate: (details) =>
+                      _handlePanUpdate(details, bounds, padding),
+                  onPanEnd: (_) => _handlePanEnd(bounds, padding),
+                  onPanCancel: () => _handlePanEnd(bounds, padding),
+                  child: SizedBox.square(
+                    key: widget.tutorialButtonKey,
+                    dimension: widget.buttonSize,
+                    child: _FloatingHeartButton(
+                      emoji: widget.emoji,
+                      size: widget.buttonSize,
+                      isActive: _isBubbleVisible,
+                      isDragging: _isDragging,
+                      hasPendingWeeklyPulse: _hasPendingWeeklyPulse == true,
+                      onTap: _handleAssistantTap,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}

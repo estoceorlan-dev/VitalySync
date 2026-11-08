@@ -1,0 +1,50 @@
+# Workspace-only material
+/tmp/
+/output/
+/docs/
+/android builds/
+/agents/
+/.vscode/
+/.github/
+
+# Local configuration and credentials
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+**/local.properties
+**/key.properties
+**/google-services.json
+**/GoogleService-Info.plist
+**/*.keystore
+**/*.jks
+**/*.pem
+**/*.p12
+**/*.pfx
+**/id_rsa
+**/id_ed25519
+
+# Dependencies, generated files, and reports
+**/node_modules/
+**/.dart_tool/
+**/.pub-cache/
+**/.pub/
+**/.gradle/
+**/build/
+**/coverage/
+**/test-results/
+**/playwright-report/
+**/.idea/
+**/.swiftpm/
+**/Pods/
+**/.flutter-plugins-dependencies
+**/Generated.xcconfig
+**/flutter_export_environment.sh
+*.iml
+*.log
+*.apk
+*.aab
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store

@@ -1,0 +1,382 @@
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../config/api_config.dart';
+import '../offline/fetch_policy.dart';
+import '../notifications/smart_nudge_delivery_service.dart';
+import 'auth_token_store.dart';
+
+class UserSessionSnapshot {
+  final int? userId;
+  final String? username;
+  final String? email;
+  final int? age;
+  final String? gender;
+  final String? userType;
+  final String? authToken;
+  final bool onboardingCompleted;
+  final bool emailVerified;
+
+  const UserSessionSnapshot({
+    required this.userId,
+    required this.username,
+    required this.email,
+    required this.age,
+    required this.gender,
+    required this.userType,
+    required this.authToken,
+    required this.onboardingCompleted,
+    required this.emailVerified,
+  });
+
+  bool get isLoggedIn =>
+      userId != null && userId! > 0 && email?.trim().isNotEmpty == true;
+  bool get hasAuthToken => authToken != null && authToken!.trim().isNotEmpty;
+
+  static const empty = UserSessionSnapshot(
+    userId: null,
+    username: null,
+    email: null,
+    age: null,
+    gender: null,
+    userType: null,
+    authToken: null,
+    onboardingCompleted: false,
+    emailVerified: false,
+  );
+}
+
+class UserSessionController {
+  UserSessionController._();
+
+  static final UserSessionController instance = UserSessionController._();
+
+  static const String _emailKey = 'email';
+  static const String _lastLoginEmailKey = 'last_login_email';
+  static const String _usernameKey = 'username';
+  static const String _userIdKey = 'user_id';
+  static const String _userTypeKey = 'user_type';
+  static const String _genderKey = 'gender';
+  static const String _ageKey = 'age';
+  static const String _onboardingCompletedKey = 'onboarding_completed';
+  static const String _emailVerifiedKey = 'email_verified';
+  static const String _legacyDemoModeKey = 'demo_mode_enabled';
+
+  Future<UserSessionSnapshot> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_legacyDemoModeKey) == true) {
+      await clearSession();
+      return UserSessionSnapshot.empty;
+    }
+
+    return UserSessionSnapshot(
+      userId: prefs.getInt(_userIdKey),
+      username: prefs.getString(_usernameKey),
+      email: prefs.getString(_emailKey),
+      age: prefs.getInt(_ageKey),
+      gender: prefs.getString(_genderKey),
+      userType: prefs.getString(_userTypeKey),
+      authToken: await AuthTokenStore.instance.readToken(),
+      onboardingCompleted: prefs.getBool(_onboardingCompletedKey) ?? false,
+      emailVerified: prefs.getBool(_emailVerifiedKey) ?? false,
+    );
+  }
+
+  Future<void> saveUser(Map<String, dynamic> user, {String? authToken}) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final dynamic rawUserId = user['user_id'];
+    if (prefs.getInt(_userIdKey) != null &&
+        prefs.getInt(_userIdKey) != rawUserId) {
+      await SmartNudgeDeliveryService.instance.cancelPending();
+    }
+    final dynamic rawAge = user['age'];
+    final email = (user['email'] ?? '').toString().trim();
+
+    if (rawUserId is int) {
+      await prefs.setInt(_userIdKey, rawUserId);
+    }
+
+    await prefs.setString(_emailKey, email);
+    if (email.isNotEmpty) {
+      await prefs.setString(_lastLoginEmailKey, email);
+    }
+    await prefs.setString(_usernameKey, (user['username'] ?? '').toString());
+
+    final parsedAge = rawAge is int ? rawAge : int.tryParse('${rawAge ?? ''}');
+    if (parsedAge != null) {
+      await prefs.setInt(_ageKey, parsedAge);
+    } else {
+      await prefs.remove(_ageKey);
+    }
+
+    final gender = (user['gender'] ?? '').toString().trim();
+    final userType = (user['user_type'] ?? '').toString().trim();
+    final onboardingCompleted = user['onboarding_completed'] == true;
+    final emailVerified = user['email_verified'] == true;
+
+    if (gender.isEmpty) {
+      await prefs.remove(_genderKey);
+    } else {
+      await prefs.setString(_genderKey, gender);
+    }
+
+    if (userType.isEmpty) {
+      await prefs.remove(_userTypeKey);
+    } else {
+      await prefs.setString(_userTypeKey, userType);
+    }
+
+    await prefs.setBool(_onboardingCompletedKey, onboardingCompleted);
+    await prefs.setBool(_emailVerifiedKey, emailVerified);
+    await prefs.remove(_legacyDemoModeKey);
+
+    if (authToken != null && authToken.trim().isNotEmpty) {
+      await AuthTokenStore.instance.saveToken(authToken.trim());
+    }
+  }
+
+  Future<void> clearSession({bool keepLastLoginEmail = false}) async {
+    await SmartNudgeDeliveryService.instance.cancelPending();
+    final prefs = await SharedPreferences.getInstance();
+    final currentEmail = prefs.getString(_emailKey)?.trim() ?? '';
+    if (keepLastLoginEmail && currentEmail.isNotEmpty) {
+      await prefs.setString(_lastLoginEmailKey, currentEmail);
+    }
+    await prefs.remove(_emailKey);
+    if (!keepLastLoginEmail) {
+      await prefs.remove(_lastLoginEmailKey);
+    }
+    await prefs.remove(_usernameKey);
+    await prefs.remove(_userIdKey);
+    await prefs.remove(_userTypeKey);
+    await prefs.remove(_genderKey);
+    await prefs.remove(_ageKey);
+    await AuthTokenStore.instance.clearToken();
+    await prefs.remove(_onboardingCompletedKey);
+    await prefs.remove(_emailVerifiedKey);
+    await prefs.remove(_legacyDemoModeKey);
+  }
+
+  Future<String?> loadLastLoginEmail() async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = prefs.getString(_lastLoginEmailKey)?.trim();
+    return email?.isNotEmpty == true ? email : null;
+  }
+
+  Future<String> resendEmailVerification() async {
+    final session = await load();
+    final email = session.email?.trim() ?? '';
+
+    if (!session.isLoggedIn || email.isEmpty) {
+      throw Exception(
+        'Email verification is only available for signed-in accounts.',
+      );
+    }
+
+    final response = await http
+        .post(
+          Uri.parse(ApiConfig.auth('/email-verification/resend')),
+          headers: await ApiConfig.jsonHeaders(),
+          body: jsonEncode(const <String, dynamic>{}),
+        )
+        .timeout(ApiRequestTimeouts.standard);
+
+    final data = _decodeResponseBody(response.body);
+
+    if (response.statusCode != 200) {
+      throw Exception(data['message'] ?? 'Unable to send verification email.');
+    }
+
+    return data['message']?.toString() ?? 'A verification code has been sent.';
+  }
+
+  Future<String> verifyEmailCode(String code) async {
+    final session = await load();
+    final normalizedCode = code.trim();
+    if (!session.isLoggedIn) {
+      throw Exception('Email verification requires a signed-in account.');
+    }
+    if (!RegExp(r'^\d{6}$').hasMatch(normalizedCode)) {
+      throw Exception('Enter the six-digit verification code.');
+    }
+
+    final response = await http
+        .post(
+          Uri.parse(ApiConfig.auth('/email-verification/confirm')),
+          headers: await ApiConfig.jsonHeaders(),
+          body: jsonEncode({'code': normalizedCode}),
+        )
+        .timeout(ApiRequestTimeouts.standard);
+    final data = _decodeResponseBody(response.body);
+    if (response.statusCode != 200 || data['email_verified'] != true) {
+      throw Exception(data['message'] ?? 'Unable to verify this email.');
+    }
+
+    await updateEmailVerified(true);
+    return data['message']?.toString() ?? 'Email verified successfully.';
+  }
+
+  Future<void> updateEmailVerified(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_emailVerifiedKey, value);
+  }
+
+  Future<void> reauthenticateWithPassword({required String password}) async {
+    final session = await load();
+    final email = session.email?.trim() ?? '';
+    final normalizedPassword = password.trim();
+
+    if (!session.isLoggedIn || email.isEmpty) {
+      throw Exception(
+        'Account re-authentication is only available for signed-in accounts.',
+      );
+    }
+
+    if (normalizedPassword.isEmpty) {
+      throw Exception('Password is required.');
+    }
+
+    final response = await http
+        .post(
+          Uri.parse(ApiConfig.auth('/login')),
+          headers: await ApiConfig.jsonHeaders(),
+          body: jsonEncode({'email': email, 'password': normalizedPassword}),
+        )
+        .timeout(ApiRequestTimeouts.standard);
+
+    final data = _decodeResponseBody(response.body);
+
+    if (response.statusCode != 200) {
+      throw Exception(data['message'] ?? 'Password verification failed.');
+    }
+
+    final token = data['access_token']?.toString();
+    if (token != null && token.isNotEmpty) {
+      await saveUser(
+        Map<String, dynamic>.from(data['user'] as Map<String, dynamic>),
+        authToken: token,
+      );
+    }
+  }
+
+  Future<String> changePassword({
+    required String currentPassword,
+    required String newPassword,
+    required String confirmPassword,
+  }) async {
+    final session = await load();
+    if (!session.isLoggedIn || !session.hasAuthToken) {
+      throw Exception('Please sign in again to change your password.');
+    }
+
+    final response = await http
+        .put(
+          Uri.parse(ApiConfig.auth('/password')),
+          headers: await ApiConfig.jsonHeaders(),
+          body: jsonEncode({
+            'current_password': currentPassword.trim(),
+            'new_password': newPassword.trim(),
+            'confirm_password': confirmPassword.trim(),
+          }),
+        )
+        .timeout(ApiRequestTimeouts.standard);
+    final data = _decodeResponseBody(response.body);
+    if (response.statusCode != 200) {
+      throw Exception(data['message'] ?? 'Unable to change this password.');
+    }
+
+    return data['message']?.toString() ?? 'Password changed successfully.';
+  }
+
+  Future<Map<String, dynamic>> updateProfile({
+    required int userId,
+    required String username,
+    required String email,
+    int? age,
+    String? gender,
+    String? userType,
+  }) async {
+    final payload = <String, dynamic>{
+      'user_id': userId,
+      'username': username.trim(),
+      'email': email.trim(),
+      'age': age,
+      'gender': _normalizedNullable(gender),
+      'user_type': _normalizedNullable(userType),
+    };
+
+    final response = await http
+        .put(
+          Uri.parse(ApiConfig.auth('/profile')),
+          headers: await ApiConfig.jsonHeaders(),
+          body: jsonEncode(payload),
+        )
+        .timeout(ApiRequestTimeouts.standard);
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+    if (response.statusCode != 200) {
+      throw Exception(data['message'] ?? 'Failed to update profile');
+    }
+
+    final user = Map<String, dynamic>.from(
+      data['user'] as Map<String, dynamic>,
+    );
+    await saveUser(user);
+    await saveSupplementalProfile(age: age, gender: gender, userType: userType);
+    return user;
+  }
+
+  Future<void> updateOnboardingCompleted(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_onboardingCompletedKey, value);
+  }
+
+  Future<void> saveSupplementalProfile({
+    int? age,
+    String? gender,
+    String? userType,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    if (age != null) {
+      await prefs.setInt(_ageKey, age);
+    }
+
+    final normalizedGender = _normalizedNullable(gender);
+    final normalizedUserType = _normalizedNullable(userType);
+
+    if (normalizedGender == null) {
+      await prefs.remove(_genderKey);
+    } else {
+      await prefs.setString(_genderKey, normalizedGender);
+    }
+
+    if (normalizedUserType == null) {
+      await prefs.remove(_userTypeKey);
+    } else {
+      await prefs.setString(_userTypeKey, normalizedUserType);
+    }
+  }
+
+  String? _normalizedNullable(String? value) {
+    final trimmed = value?.trim() ?? '';
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  Map<String, dynamic> _decodeResponseBody(String body) {
+    if (body.trim().isEmpty) {
+      return const <String, dynamic>{};
+    }
+
+    final decoded = jsonDecode(body);
+    if (decoded is Map<String, dynamic>) {
+      return decoded;
+    }
+
+    return const <String, dynamic>{};
+  }
+}

@@ -1,0 +1,544 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:google_fonts/google_fonts.dart';
+
+import '../../../../features/log/data/log_api.dart';
+import '../../../../features/onboarding/presentation/pages/onboarding_page.dart';
+import '../../../../shared/config/api_config.dart';
+import '../../../../shared/offline/fetch_policy.dart';
+import '../../../../shared/preferences/user_session.dart';
+import '../../../../shared/preferences/session_expiration_coordinator.dart';
+import '../../../../shared/theme/app_page_style.dart';
+import '../../../../shared/widgets/terms_privacy_widget.dart';
+import '../../../../shared/widgets/validation_dialog.dart';
+import '../../data/email_validator.dart';
+import '../widgets/auth_chrome.dart';
+import 'login_page.dart';
+import 'package:vitalysync/l10n/localized_text.dart';
+
+class SignUpPage extends StatefulWidget {
+  const SignUpPage({super.key});
+
+  @override
+  State<SignUpPage> createState() => _SignUpPageState();
+}
+
+class _SignUpPageState extends State<SignUpPage> {
+  static const List<String> _genderOptions = ['Male', 'Female', 'Other'];
+
+  final _formKey = GlobalKey<FormState>();
+
+  bool _obscurePassword = true;
+  bool _obscureConfirmPassword = true;
+  bool _agreeTerms = false;
+  bool _isLoading = false;
+  String? _selectedGender;
+
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _usernameController = TextEditingController();
+  final TextEditingController _ageController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _confirmPasswordController =
+      TextEditingController();
+  final FocusNode _emailFocusNode = FocusNode();
+  final FocusNode _usernameFocusNode = FocusNode();
+  final FocusNode _ageFocusNode = FocusNode();
+  final FocusNode _passwordFocusNode = FocusNode();
+  final FocusNode _confirmPasswordFocusNode = FocusNode();
+
+  Map<String, dynamic> _decodeResponseBody(http.Response response) {
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+    } catch (_) {
+      // Keep a friendly fallback when the server does not return JSON.
+    }
+
+    return const {};
+  }
+
+  String _signUpFailureMessage(Map<String, dynamic> data) {
+    final serverMessage = data['message'] ?? data['error'];
+    final normalizedMessage = serverMessage?.toString().trim();
+
+    if (normalizedMessage != null && normalizedMessage.isNotEmpty) {
+      return normalizedMessage;
+    }
+
+    return 'Signup failed';
+  }
+
+  Future<void> signUp() async {
+    if (_isLoading) {
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    final url = Uri.parse(ApiConfig.auth('/signup'));
+    var navigatedToOnboarding = false;
+
+    try {
+      final requestBody = jsonEncode({
+        "username": _usernameController.text.trim(),
+        "email": _emailController.text.trim(),
+        "age": int.tryParse(_ageController.text.trim()),
+        "gender": _selectedGender,
+        "password": _passwordController.text.trim(),
+      });
+      final response = await http
+          .post(url, headers: await ApiConfig.jsonHeaders(), body: requestBody)
+          .timeout(ApiRequestTimeouts.standard);
+
+      if (!mounted) return;
+      final data = _decodeResponseBody(response);
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final authToken = data['access_token']?.toString().trim();
+        if (authToken == null || authToken.isEmpty) {
+          if (!mounted) return;
+          await ValidationDialog.show(
+            context,
+            message:
+                'Your account was created, but we could not sign you in. Please log in.',
+            type: ValidationDialogType.error,
+          );
+          return;
+        }
+
+        await UserSessionController.instance.saveUser(
+          Map<String, dynamic>.from(data['user'] as Map<String, dynamic>),
+          authToken: authToken,
+        );
+        await SessionExpirationCoordinator.instance.checkNow();
+        await LogApi.persistServerStreakSnapshot(
+          data['streak'] as Map<String, dynamic>?,
+        );
+
+        if (!mounted) return;
+
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => OnboardingPage(
+              userId: (data['user'] as Map<String, dynamic>)['user_id'] as int,
+            ),
+          ),
+        );
+        navigatedToOnboarding = true;
+      } else {
+        if (!mounted) return;
+        await ValidationDialog.show(
+          context,
+          message: _signUpFailureMessage(data),
+          type: ValidationDialogType.error,
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      await ValidationDialog.show(
+        context,
+        message:
+            'VitalySync could not connect right now. Please check your connection and try again.',
+        type: ValidationDialogType.connection,
+      );
+    } finally {
+      if (mounted && _isLoading && !navigatedToOnboarding) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  InputDecoration _inputDecoration({
+    required String label,
+    required IconData icon,
+    Widget? suffixIcon,
+  }) {
+    return authInputDecoration(
+      context,
+      label: label,
+      icon: icon,
+      suffixIcon: suffixIcon,
+    );
+  }
+
+  void _showTermsModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) {
+        final isDark = Theme.of(context).brightness == Brightness.dark;
+
+        return DraggableScrollableSheet(
+          initialChildSize: 0.82,
+          minChildSize: 0.6,
+          maxChildSize: 0.95,
+          builder: (context, scrollController) {
+            return Container(
+              decoration: BoxDecoration(
+                color: isDark ? const Color(0xFF142237) : Colors.white,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(28),
+                ),
+              ),
+              child: Column(
+                children: [
+                  const SizedBox(height: 12),
+                  Container(
+                    width: 46,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: LocalizedText(
+                      'Terms and privacy policy',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: pagePrimaryTextColor(context),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      controller: scrollController,
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+                      child: const TermsPrivacyWidget(),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _usernameController.dispose();
+    _ageController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    _emailFocusNode.dispose();
+    _usernameFocusNode.dispose();
+    _ageFocusNode.dispose();
+    _passwordFocusNode.dispose();
+    _confirmPasswordFocusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return AuthScaffold(
+      illustrationAsset: authWorkoutAsset,
+      topOverlayAsset: authHealthyLifestyleAsset,
+      bottomOverlayAssets: const [authMeditationAsset],
+      backdropStyle: AuthBackdropStyle.signUp,
+      centerContent: false,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 18, bottom: 28),
+        child: AuthGlassPanel(
+          child: Form(
+            key: _formKey,
+            child: Column(
+              children: [
+                const AuthBrandHeader(
+                  title: 'Create your account',
+                  subtitle: 'Start your wellness journey with VitalySync.',
+                  logoSize: 68,
+                ),
+                const SizedBox(height: 24),
+                TextFormField(
+                  key: const ValueKey('signup-email-field'),
+                  controller: _emailController,
+                  focusNode: _emailFocusNode,
+                  keyboardType: TextInputType.emailAddress,
+                  textInputAction: TextInputAction.next,
+                  onFieldSubmitted: (_) => _usernameFocusNode.requestFocus(),
+                  style: TextStyle(color: pagePrimaryTextColor(context)),
+                  decoration: _inputDecoration(
+                    label: 'Email',
+                    icon: Icons.email_outlined,
+                  ),
+                  validator: (value) => EmailValidator.validate(
+                    value,
+                    emptyMessage: 'Enter your email',
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextFormField(
+                  key: const ValueKey('signup-username-field'),
+                  controller: _usernameController,
+                  focusNode: _usernameFocusNode,
+                  textInputAction: TextInputAction.next,
+                  onFieldSubmitted: (_) => _ageFocusNode.requestFocus(),
+                  style: TextStyle(color: pagePrimaryTextColor(context)),
+                  decoration: _inputDecoration(
+                    label: 'Username',
+                    icon: Icons.person_outline,
+                  ),
+                  validator: (value) =>
+                      value == null || value.isEmpty ? 'Enter username' : null,
+                ),
+                const SizedBox(height: 14),
+                TextFormField(
+                  key: const ValueKey('signup-age-field'),
+                  controller: _ageController,
+                  focusNode: _ageFocusNode,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.next,
+                  onFieldSubmitted: (_) => _passwordFocusNode.requestFocus(),
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  style: TextStyle(color: pagePrimaryTextColor(context)),
+                  decoration: _inputDecoration(
+                    label: 'Age',
+                    icon: Icons.cake_outlined,
+                  ),
+                  validator: (value) {
+                    final ageText = value?.trim() ?? '';
+                    if (ageText.isEmpty) {
+                      return 'Enter your age';
+                    }
+
+                    final age = int.tryParse(ageText);
+                    if (age == null) {
+                      return 'Enter a valid age';
+                    }
+                    if (age < 1 || age > 120) {
+                      return 'Age must be between 1 and 120';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 14),
+                DropdownButtonFormField<String>(
+                  key: ValueKey(_selectedGender),
+                  initialValue: _selectedGender,
+                  isExpanded: true,
+                  dropdownColor: isDark
+                      ? const Color(0xFF142237)
+                      : Colors.white,
+                  style: TextStyle(color: pagePrimaryTextColor(context)),
+                  decoration: _inputDecoration(
+                    label: 'Gender',
+                    icon: Icons.wc_outlined,
+                  ),
+                  items: _genderOptions
+                      .map(
+                        (gender) => DropdownMenuItem<String>(
+                          value: gender,
+                          child: LocalizedText(gender),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedGender = value;
+                    });
+                  },
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Select your gender'
+                      : null,
+                ),
+                const SizedBox(height: 14),
+                TextFormField(
+                  key: const ValueKey('signup-password-field'),
+                  controller: _passwordController,
+                  focusNode: _passwordFocusNode,
+                  obscureText: _obscurePassword,
+                  textInputAction: TextInputAction.next,
+                  onFieldSubmitted: (_) =>
+                      _confirmPasswordFocusNode.requestFocus(),
+                  style: TextStyle(color: pagePrimaryTextColor(context)),
+                  decoration: _inputDecoration(
+                    label: 'Password',
+                    icon: Icons.lock_outline,
+                    suffixIcon: IconButton(
+                      tooltip: _obscurePassword
+                          ? 'Show password'
+                          : 'Hide password',
+                      icon: Icon(
+                        _obscurePassword
+                            ? Icons.visibility_outlined
+                            : Icons.visibility_off_outlined,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _obscurePassword = !_obscurePassword;
+                        });
+                      },
+                    ),
+                  ),
+                  validator: (value) {
+                    if (value == null || value.isEmpty) {
+                      return 'Enter a password';
+                    }
+                    if (value.length < 6) {
+                      return 'Minimum 6 characters';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 14),
+                TextFormField(
+                  key: const ValueKey('signup-confirm-password-field'),
+                  controller: _confirmPasswordController,
+                  focusNode: _confirmPasswordFocusNode,
+                  obscureText: _obscureConfirmPassword,
+                  textInputAction: TextInputAction.done,
+                  onEditingComplete: () {},
+                  style: TextStyle(color: pagePrimaryTextColor(context)),
+                  decoration: _inputDecoration(
+                    label: 'Confirm password',
+                    icon: Icons.lock_person_outlined,
+                    suffixIcon: IconButton(
+                      tooltip: _obscureConfirmPassword
+                          ? 'Show confirm password'
+                          : 'Hide confirm password',
+                      icon: Icon(
+                        _obscureConfirmPassword
+                            ? Icons.visibility_outlined
+                            : Icons.visibility_off_outlined,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _obscureConfirmPassword = !_obscureConfirmPassword;
+                        });
+                      },
+                    ),
+                  ),
+                  validator: (value) {
+                    if (value == null || value.isEmpty) {
+                      return 'Confirm your password';
+                    }
+                    if (value != _passwordController.text) {
+                      return 'Passwords do not match';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 18),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? Colors.white.withValues(alpha: 0.05)
+                        : const Color(0xFFF4FBF8).withValues(alpha: 0.84),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: pageBorderColor(context)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Transform.scale(
+                        scale: 1.05,
+                        child: Checkbox(
+                          value: _agreeTerms,
+                          activeColor: Theme.of(context).colorScheme.primary,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          onChanged: (value) {
+                            setState(() {
+                              _agreeTerms = value ?? false;
+                            });
+                          },
+                        ),
+                      ),
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 10),
+                          child: Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              LocalizedText(
+                                'I agree to the terms and conditions and the privacy policy ',
+                                style: TextStyle(
+                                  fontSize: 13.5,
+                                  color: pageSecondaryTextColor(context),
+                                  height: 1.4,
+                                ),
+                              ),
+                              GestureDetector(
+                                onTap: _showTermsModal,
+                                child: LocalizedText(
+                                  'View',
+                                  style: TextStyle(
+                                    fontSize: 13.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 22),
+                AuthButton.primary(
+                  label: 'Create account',
+                  icon: Icons.person_add_alt_1_rounded,
+                  isLoading: _isLoading,
+                  onPressed: (_agreeTerms && !_isLoading)
+                      ? () {
+                          FocusScope.of(context).unfocus();
+                          if (_formKey.currentState!.validate()) {
+                            signUp();
+                          }
+                        }
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(builder: (_) => const LoginPage()),
+                    );
+                  },
+                  icon: const Icon(Icons.arrow_back_rounded, size: 19),
+                  label: LocalizedText(
+                    'Back to log in',
+                    style: GoogleFonts.poppins(fontWeight: FontWeight.w700),
+                  ),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Theme.of(context).colorScheme.primary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

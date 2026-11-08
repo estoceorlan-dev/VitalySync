@@ -1,0 +1,63 @@
+Auth illustration asset notes
+
+- auth_healthy_lifestyle.svg
+  Source: unDraw, "Healthy lifestyle"
+  URL: https://undraw.co/illustration/healthy-lifestyle_8zpg
+  Asset URL: https://cdn.undraw.co/illustrations/healthy-lifestyle_8zpg.svg
+  License summary: free for personal and commercial use, with restrictions on
+  redistributing asset packs, replicating unDraw, and AI/ML training use.
+
+- auth_workout.svg
+  Source: Scale by Flexiple, "Workout vectors"
+  URL: https://scale.flexiple.com/illustrations/workout-multi/
+  License summary: free for personal, academic, and commercial use without
+  attribution; do not resell/repackage illustrations or duplicate Scale.
+
+- auth_meditation.svg
+  Source: Scale by Flexiple, "Meditation illustration"
+  URL: https://scale.flexiple.com/illustrations/meditation-at-home-multi/
+  Asset URL: https://scale.flexiple.com/rails/active_storage/blobs/proxy/eyJfcmFpbHMiOnsibWVzc2FnZSI6IkJBaHBBbHdQIiwiZXhwIjpudWxsLCJwdXIiOiJibG9iX2lkIn19--c6d08e34fc6983226a7a8f7ca1b3e50f5b6f52b2/29.Meditation-20(mask-multicolor)-02.svg/
+  License summary: free for personal, academic, and commercial use without
+  attribution; do not resell/repackage illustrations or duplicate Scale.
+
+- auth_work_stress.svg
+  Source: Scale by Flexiple, "Work stress illustration"
+  URL: https://scale.flexiple.com/illustrations/work-stress-multi/
+  License summary: free for personal, academic, and commercial use without
+  attribution; do not resell/repackage illustrations or duplicate Scale.
+
+- auth_dashboard.svg
+  Source: Scale by Flexiple, "Performance dashboard illustration"
+  URL: https://scale.flexiple.com/illustrations/performance-dashboard/
+  Asset URL: https://scale.flexiple.com/rails/active_storage/blobs/proxy/eyJfcmFpbHMiOnsibWVzc2FnZSI6IkJBaHBBcVVPIiwiZXhwIjpudWxsLCJwdXIiOiJibG9iX2lkIn19--d515e904aa7f478ffb960595029e36ed360e30c9/30.-20Exemplory--20Performance.svg/
+  Retrieved: 2026-06-05
+  License summary: free for personal, academic, and commercial use without
+  attribution; do not resell/repackage illustrations or duplicate Scale.
+
+Welcome carousel illustrations
+
+- welcome_morning.svg
+  Source: unDraw, "Morning Plans"
+  URL: https://undraw.co/illustration/morning-plans_5vln
+  Asset URL: https://cdn.undraw.co/illustration/morning-plans_5vln.svg
+
+- welcome_mindfulness.svg
+  Source: unDraw, "Mindfulness"
+  URL: https://undraw.co/illustration/mindfulness_d853
+  Asset URL: https://cdn.undraw.co/illustration/mindfulness_d853.svg
+
+- welcome_reminders.svg
+  Source: unDraw, "Reminders"
+  URL: https://undraw.co/illustration/reminders_o8j5
+  Asset URL: https://cdn.undraw.co/illustration/reminders_o8j5.svg
+
+- welcome_insights.svg
+  Source: unDraw, "Data Reports"
+  URL: https://undraw.co/illustration/data-reports_l2u3
+  Asset URL: https://cdn.undraw.co/illustration/data-reports_l2u3.svg
+
+  Retrieved: 2026-07-14
+  License: https://undraw.co/license
+  License summary: free for personal and commercial use without attribution.
+  Do not redistribute the illustrations as an asset pack, replicate unDraw, or
+  use the assets for AI/ML training.
